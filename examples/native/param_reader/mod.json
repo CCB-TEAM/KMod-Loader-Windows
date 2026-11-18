@@ -1,0 +1,1 @@
+{"format":2,"platform":["Android","Windows"],"native":{"Android":"libparam_reader.so","Windows":"param_reader.dll"},"id":"param_reader","name":"Param Reader","version":"0.1.0","author":"kmod","description":"Hooks a game function from C++ and reads its parameters by name.","depends":["kmod>=0.3.0"]}

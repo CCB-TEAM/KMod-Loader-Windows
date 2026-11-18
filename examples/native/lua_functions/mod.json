@@ -1,0 +1,1 @@
+{"format":2,"platform":["Android","Windows"],"native":{"Android":"liblua_functions.so","Windows":"lua_functions.dll"},"id":"lua_functions","name":"Lua Functions","version":"0.1.0","author":"kmod","description":"Native functions called from Lua: Native.fnv1a, Native.stats, Native.split.","depends":["kmod>=0.3.0"]}

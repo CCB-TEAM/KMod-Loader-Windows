@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.18)
+project(param_reader CXX)
+set(CMAKE_CXX_STANDARD 17)
+include(${CMAKE_CURRENT_SOURCE_DIR}/../kmod_mod.cmake)
+kmod_native_mod(param_reader src/main.cpp)

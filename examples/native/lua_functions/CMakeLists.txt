@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.18)
+project(lua_functions CXX)
+set(CMAKE_CXX_STANDARD 17)
+include(${CMAKE_CURRENT_SOURCE_DIR}/../kmod_mod.cmake)
+kmod_native_mod(lua_functions src/main.cpp)
