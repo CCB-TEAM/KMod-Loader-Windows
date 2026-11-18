@@ -18,7 +18,7 @@ kmod loader $Version ($($f.Name)) for KARDS (Windows)
 
 Install: copy dwmapi.dll and the kmod folder next to kards-Win64-Shipping.exe
 (<game>\kards\Binaries\Win64\). If a dwmapi.dll is already there (UE4SS), rename it first.
-Put mods into kmod\mods\ (folders or .kmod packages). Insert opens the in-game menu.
+Put mods into kmod\mods\ (folders or .kmod packages); enable them on the Mods tab of the game settings.
 Log: kmod\logs\kmod.log.   Docs: https://ccb-team.github.io/kmod-docs/
 "@
     Set-Content -Path "$stage\README.txt" -Value $readme -Encoding UTF8

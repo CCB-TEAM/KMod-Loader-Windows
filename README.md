@@ -11,14 +11,14 @@ Download a zip from [Releases](https://github.com/CCB-TEAM/KMod-Loader-Windows/r
 * `release` — everyday use.
 * `dev` — adds a console window (live log, console commands, Lua) and debug logging, for mod authors.
 
-Press **Insert** in game for the ImGui menu (mods, console, about). Mods go into `kmod\mods\` (folders or `.kmod` packages); the log is `kmod\logs\kmod.log`. There is no paks folder on Windows.
+Mods go into `kmod\mods\` (folders or `.kmod` packages); the log is `kmod\logs\kmod.log`. There is no paks folder on Windows.
 
 ## How it works
 
 * `proxy/` — `dwmapi.dll`: forwards every export of the system dwmapi and starts the core from its own thread (never from `DllMain`).
 * `core/src/resolver.cpp` — finds `GUObjectArray`, the name pool and `UObject::ProcessEvent` by scanning the PE image; the Blueprint interpreter and `GNatives` by disassembling with Zydis. No hard-coded offsets.
 * `core/src/x64.cpp` — inline hook engine (RIP-relative operands and relative branches are relocated).
-* `core/src/win/overlay.cpp` — Dear ImGui overlay on `IDXGISwapChain::Present` (Direct3D 11 and 12).
+* `core/src/win/overlay.cpp` — an experimental Dear ImGui overlay on `IDXGISwapChain::Present` (Direct3D 11 and 12), used for testing native mods. Not part of the shipped builds: configure with `-DKMOD_OVERLAY=ON` to get it (Insert opens it).
 * The Lua host, reflection layer (`reflect.*`), mod loader scripts (`core/lua`) and `kmod.h` are shared with the Android core.
 
 ## Build

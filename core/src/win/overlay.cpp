@@ -1,6 +1,8 @@
 // In-game ImGui overlay: see overlay.h. Direct3D 11 and 12 are both supported; which one the game uses is found out from its swap chain.
 #include "overlay.h"
 
+#ifdef KMOD_OVERLAY
+
 #include <d3d11.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
@@ -517,3 +519,5 @@ void Overlay_SetSnapshot(const std::string& text)
 }
 
 std::string Overlay_Status() { return g_status; }
+
+#endif   // KMOD_OVERLAY

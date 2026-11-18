@@ -11,6 +11,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(KMOD_SDK_DIR "D:/KARDS/default/android/dump/out/CppSDK" CACHE PATH "Dumper CppSDK root")
 set(KMOD_LUA_DIR "D:/CCB-TEAM/RE-UE4SS/deps/first/LuaRaw" CACHE PATH "Lua 5.4 sources (from UE4SS deps)")
 option(KMOD_DEV "Developer build: verbose logs" ON)
+option(KMOD_OVERLAY "Experimental ImGui overlay (Insert); not part of the shipped builds" OFF)
 
 # ---- Zydis (x86-64 disassembler used by the inline hook engine and the signature resolvers)
 set(ZYDIS_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
@@ -47,13 +48,17 @@ target_include_directories(kmodimgui PUBLIC ${IMGUI_DIR} ${IMGUI_DIR}/backends)
 target_compile_options(kmodimgui PRIVATE /W3 /O2 /EHsc /utf-8)
 target_compile_definitions(kmodimgui PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
 
-add_library(kmod_core SHARED ${KMOD_CORE_SRC} $<TARGET_OBJECTS:kmodsdk> $<TARGET_OBJECTS:kmodlua> $<TARGET_OBJECTS:kmodimgui>)
+add_library(kmod_core SHARED ${KMOD_CORE_SRC} $<TARGET_OBJECTS:kmodsdk> $<TARGET_OBJECTS:kmodlua>)
+if(KMOD_OVERLAY)
+  target_sources(kmod_core PRIVATE $<TARGET_OBJECTS:kmodimgui>)
+  target_compile_definitions(kmod_core PRIVATE KMOD_OVERLAY=1)
+endif()
 target_include_directories(kmod_core PRIVATE ${IMGUI_DIR} ${IMGUI_DIR}/backends)
 target_include_directories(kmod_core PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/core/include ${CMAKE_CURRENT_SOURCE_DIR}/core/src ${CMAKE_CURRENT_SOURCE_DIR}/core/src/win ${CMAKE_CURRENT_SOURCE_DIR}/core/src/win/posix
   ${CMAKE_CURRENT_BINARY_DIR}/gen/sdk ${KMOD_SDK_DIR} ${KMOD_SDK_DIR}/SDK ${KMOD_LUA_DIR}/include ${CMAKE_CURRENT_BINARY_DIR}/gen)
 target_compile_options(kmod_core PRIVATE /W3 /wd4244 /wd4267 /wd4996 /wd4800 /bigobj /EHsc /utf-8 /O2 /FI${CMAKE_CURRENT_SOURCE_DIR}/core/src/win/compat.h)
-target_compile_definitions(kmod_core PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS KMOD_PLATFORM_WINDOWS=1 $<$<BOOL:${KMOD_DEV}>:KMOD_DEV=1>)
+target_compile_definitions(kmod_core PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS KMOD_PLATFORM_WINDOWS=1 $<$<BOOL:${KMOD_DEV}>:KMOD_DEV=1> $<$<BOOL:${KMOD_OVERLAY}>:KMOD_OVERLAY=1>)
 target_link_libraries(kmod_core PRIVATE Zydis winhttp ws2_32 secur32 dbghelp version shlwapi dxguid imm32)
 set_target_properties(kmod_core PROPERTIES OUTPUT_NAME kmod_core)
 
