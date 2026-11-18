@@ -29,7 +29,8 @@ Needs Visual Studio (C++ workload), CMake and Python 3, and the Dumper-7 SDK hea
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DKMOD_DEV=ON            # dev
 cmake -S . -B build-release -G "Visual Studio 17 2022" -A x64 -DKMOD_DEV=OFF   # release
 cmake --build build --config Release --target kmod_core dwmapi_proxy
-powershell -File tools/stage.ps1 -Game "<game>\kards\Binaries\Win64"           # install into a game
+powershell -File tools/stage.ps1 -Flavor dev -Game "<game>\kards\Binaries\Win64" # install dev
+# For release, build build-release first and pass -Flavor release.
 powershell -File tools/package.ps1                                              # dist/*.zip for both flavours
 ```
 

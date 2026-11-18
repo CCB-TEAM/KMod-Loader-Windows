@@ -1,6 +1,7 @@
 # Packs the built loader into dist/: kmod-loader-windows-<version>-<flavor>.zip (flavor: dev | release).
 #   .\tools\package.ps1            builds nothing: run cmake --build for build\ (dev) and build-release\ (release) first
 param([string]$Version = "")
+$ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 if (-not $Version) { $Version = ((Select-String -Path "$root\core\src\kmod_version.h" -Pattern 'KMOD_VERSION "([^"]+)"').Matches[0].Groups[1].Value) }
 $out = Join-Path $root "dist"

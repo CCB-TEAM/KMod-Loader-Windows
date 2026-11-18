@@ -1,9 +1,11 @@
-# Copies the built loader into dist/ (the install layout) and, with -Game <Binaries\Win64 folder>, into the game.
+# Copies the selected dev/release loader into dist/ (the install layout) and, with -Game <Binaries\Win64 folder>, into the game.
 #   dist\dwmapi.dll            the proxy (next to kards-Win64-Shipping.exe)
 #   dist\kmod\kmod_core.dll    the core; kmod\ also receives mods\, data\, logs\ when the game runs
-param([string]$Game = "", [string]$Config = "Release")
+param([string]$Game = "", [ValidateSet("dev", "release")][string]$Flavor = "dev", [string]$Config = "Release")
+$ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
-$bin = Join-Path $root "build\$Config"
+$tree = if ($Flavor -eq "release") { "build-release" } else { "build" }
+$bin = Join-Path $root "$tree\$Config"
 $dist = Join-Path $root "dist"
 New-Item -ItemType Directory -Force "$dist\kmod" | Out-Null
 Copy-Item "$bin\dwmapi.dll" "$dist\dwmapi.dll" -Force

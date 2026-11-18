@@ -46,13 +46,15 @@ void MkdirP(const std::string& path)
 
 bool StatOf(const std::string& p, struct stat& st) { return stat(p.c_str(), &st) == 0; }
 
-// Copies src to dst unless dst already has the same size and modification time. The copy is written under a temporary name
-// and renamed, so an interrupted copy never leaves a half library behind. Returns false with err set on failure.
+// Copies src to dst under a temporary name and renames it, so an interrupted
+// copy never leaves a half library behind. Returns false with err set on failure.
 bool SyncFile(const std::string& src, const std::string& dst, std::string& err)
 {
-    struct stat a, b;
+    struct stat a;
     if (!StatOf(src, a)) { err = "missing " + src; return false; }
-    if (StatOf(dst, b) && b.st_size == a.st_size && b.st_mtime >= a.st_mtime) return true;
+    // Always refresh the private copy. The compatibility stat layer exposes
+    // only second-resolution mtimes, so a rapid rebuild can otherwise leave
+    // an old native library loaded when size and timestamp happen to match.
     std::string tmp = dst + ".tmp";
     FILE* in = fopen(src.c_str(), "rb");
     if (!in) { err = "cannot read " + src; return false; }
