@@ -15,6 +15,7 @@ void LuaHost_PreHook(SDK::UObject* self, SDK::UFunction* fn, void* parms, void* 
 void LuaHost_PostHook(SDK::UObject* self, SDK::UFunction* fn, void* parms, void* result = nullptr);
 void LuaHost_RunString(const std::string& code, const char* chunkName);
 void LuaHost_ReloadMods();
+void LuaHost_ReleaseOwner(const char* only);   // forget the hooks, timers, workers... of one mod (nullptr: all mods)
 bool KMod_DetectLayout(bool force);
 bool KMod_LayoutMismatch();
 std::vector<std::string> KMod_ScriptDiag(bool start);
@@ -46,6 +47,15 @@ int NativeUi_Show(const char* specJson, void (*cb)(int, const char*, const char*
 void NativeUi_Set(int panel, const char* key, const char* value);
 void NativeUi_Close(int panel);
 void NativeUi_Drain();
+// Image chooser: the chosen image is saved to destNoExt + ".png" (Android: gallery, scaled to <= 2048 px) or destNoExt + its own extension
+// (Windows: file dialog). cb(token, "$picked", path | "" if cancelled | "!" + error, user) runs on the game thread. false = not available.
+bool NativeUi_PickImage(const char* destNoExt, void (*cb)(int, const char*, const char*, void*), void* user);
+// Any file with one of the comma-separated extensions (e.g. "artpack,zip"): copied byte for byte to destNoExt + "." + its extension; cb value is "<saved path>\n<original file name>".
+bool NativeUi_PickFile(const char* destNoExt, const char* exts, void (*cb)(int, const char*, const char*, void*), void* user);
+// "Save as": the player chooses where src goes (Android: a document picker, Windows: a save dialog). cb value is what the player chose (a path or a file name), "" if cancelled, "!" + error.
+bool NativeUi_SaveFile(const char* src, const char* suggestedName, void (*cb)(int, const char*, const char*, void*), void* user);
+// Keyboard: is "F8" / "CTRL+SHIFT+K" down right now, while the game window has the focus? (Windows; false on Android)
+bool Platform_KeyDown(const char* spec);
 void* NativeUi_JavaVM();
 void* NativeUi_Env();
 void* NativeUi_AppClassLoader();

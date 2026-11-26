@@ -468,11 +468,11 @@ void Worker_Pump(lua_State* L)
     }
 }
 
-void Worker_CloseUser(lua_State* L)
+void Worker_CloseUser(lua_State* L, const char* only)
 {
     for (size_t i = 0; i < g_workers.size();)
     {
-        if (!g_workers[i]->owner.empty()) { Shutdown(L, g_workers[i]); g_workers.erase(g_workers.begin() + i); }
+        if (!g_workers[i]->owner.empty() && (!only || g_workers[i]->owner == only)) { Shutdown(L, g_workers[i]); g_workers.erase(g_workers.begin() + i); }
         else i++;
     }
 }

@@ -16,4 +16,4 @@ struct WorkerHooks
 void Worker_Init(lua_State* L, const WorkerHooks& hooks, const char* jsonSource);
 int Worker_Create(lua_State* L);        // lua_CFunction: kmod.worker(ownerModId, absoluteScriptPath) -> handle
 void Worker_Pump(lua_State* L);         // game thread, every tick: deliver messages/logs/errors sent by workers
-void Worker_CloseUser(lua_State* L);    // stop and forget every worker that belongs to a mod (reload / disable)
+void Worker_CloseUser(lua_State* L, const char* only = nullptr);    // stop and forget every worker that belongs to a mod (reload / disable)

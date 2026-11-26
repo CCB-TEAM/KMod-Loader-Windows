@@ -22,6 +22,7 @@ extern "C"
 #include "reflect.h"
 #include "resolver.h"
 #include "x64.h"
+#include "overlay.h"
 
 namespace
 {
@@ -217,6 +218,13 @@ void FillApi(LoadedMod& m)
     a.lua = MakeLuaApi();
     /* the Android UI / JNI fields stay null on Windows (see kmod.h) */
     a.platform = "Windows";
+#ifdef KMOD_OVERLAY
+    a.overlay_add_panel = [](void (*draw)(void*), void* user) { return Overlay_AddPanel(draw, user); };
+    a.overlay_visible = []() { return Overlay_Visible() ? 1 : 0; };
+    a.imgui_context = []() { return Overlay_Context(); };
+    a.imgui_allocators = [](void** x, void** y, void** z) { Overlay_Allocators(x, y, z); };
+    a.imgui_version = Overlay_ImGuiVersion();
+#endif
 }
 
 int Fail(lua_State* L, const std::string& msg)

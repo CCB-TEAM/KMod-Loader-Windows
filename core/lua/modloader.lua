@@ -126,11 +126,11 @@ function kmod.option_label(rec, s, value) return kmod.rec_text(rec, "settings." 
 -- strings of the manager UI itself
 local UI = {
   en = { mods = "Mods", version = "Version", enabled = "Enabled", language = "Language", status = "Status",
-         no_mods = "No mods found", no_mods_hint = "Put mod folders or .kmod files in kmod/mods", auto = "Auto (game language)" },
+         no_mods = "No mods found", no_mods_hint = "Put mod folders or .kmod files in kmod/mods", auto = "Auto (game language)", reload = "Reload", reload_all = "Reload all mods" },
   ["zh-CN"] = { mods = "模组", version = "版本", enabled = "启用", language = "语言", status = "状态",
-                no_mods = "未找到模组", no_mods_hint = "把模组文件夹或 .kmod 文件放进 kmod/mods", auto = "自动（跟随游戏）" },
+                no_mods = "未找到模组", no_mods_hint = "把模组文件夹或 .kmod 文件放进 kmod/mods", auto = "自动（跟随游戏）", reload = "重载", reload_all = "重载所有模组" },
   ["zh-TW"] = { mods = "模組", version = "版本", enabled = "啟用", language = "語言", status = "狀態",
-                no_mods = "找不到模組", no_mods_hint = "把模組資料夾或 .kmod 檔案放進 kmod/mods", auto = "自動（跟隨遊戲）" },
+                no_mods = "找不到模組", no_mods_hint = "把模組資料夾或 .kmod 檔案放進 kmod/mods", auto = "自動（跟隨遊戲）", reload = "重載", reload_all = "重載所有模組" },
 }
 function kmod.t(key)
   for _, tag in ipairs(langChain(kmod.lang_current())) do
@@ -557,6 +557,69 @@ local function loadOne(rec)
   if kmod.net_sockets_api then env.WebSocket, env.Socket = kmod.net_sockets_api(rec) end
   if kmod.net_api then env.Net = kmod.net_api(rec) end          -- the game's own WebSocket traffic (permission "game_network")
   if kmod.ui_api then env.UI = kmod.ui_api(rec) end            -- UI.window{...}, UI.toast(text)
+  -- Media.pick_image(dest, cb): the player picks an image (Android: the gallery / system chooser; Windows: a file dialog). It is saved to
+  -- dest + ".png" (Windows keeps the picked file's own extension: .png .jpg .bmp) and cb(path) runs on the game thread. cb(nil, "cancelled")
+  -- if the player chose nothing, cb(nil, message) on errors. dest (no extension) must lie inside kmod/art or this mod's own kmod/data folder.
+  -- Returns false if the platform cannot show a chooser. Not available in the dev console of an old loader: check `Media ~= nil`.
+  -- Input (Windows; on Android there is no keyboard and nothing ever fires): Input.is_down("F8" | "CTRL+SHIFT+K") and Input.on_key(key, fn): fn() runs each
+  -- time the key combination goes down (checked every 40 ms, only while the game window has the focus). Keys: A-Z, 0-9, F1-F24, CTRL, SHIFT, ALT, ESC, ENTER,
+  -- SPACE, TAB, INSERT, DELETE, HOME, END, PAGEUP, PAGEDOWN, UP, DOWN, LEFT, RIGHT, TILDE.
+  env.Input = {
+    is_down = function(k) return kmod.key_down(k) end,
+    on_key = function(k, fn)
+      assert(type(k) == "string" and type(fn) == "function", "Input.on_key(key, callback)")
+      -- debounce: the combination must have been up for 3 checks (120 ms) before it can fire again (the focus can flicker while a window opens)
+      local armed, upTicks = true, 3
+      env.LoopAsync(40, function()
+        if kmod.key_down(k) then
+          if armed then armed = false; fn() end
+          upTicks = 0
+        else
+          upTicks = upTicks + 1
+          if upTicks >= 3 then armed = true end
+        end
+        return false
+      end)
+    end,
+  }
+  env.Media = {
+    pick_image = function(dest, cb)
+      assert(type(dest) == "string" and type(cb) == "function", "Media.pick_image(dest, callback)")
+      local d = dest:gsub("\\", "/")
+      local okPath = not d:find("..", 1, true)
+        and (d:find(P.root .. "/art/", 1, true) == 1 or d:find(P.data .. "/" .. rec.id .. "/", 1, true) == 1)
+      if not okPath then error("Media.pick_image: the destination must be inside kmod/art or this mod's data folder", 2) end
+      return kmod.pick_image(rec.id, d, cb)
+    end,
+    -- Media.pick_file(dest, exts, cb): like pick_image, but any file whose extension is in exts ("artpack,zip"); copied as is to dest + "." + ext.
+    -- cb(path, original_name). Media.save_file(src, suggested_name, cb): "save as": the player chooses where src goes; cb(chosen_name). src must lie
+    -- inside kmod/art or this mod's data folder.
+    pick_file = function(dest, exts, cb)
+      assert(type(dest) == "string" and type(exts) == "string" and type(cb) == "function", "Media.pick_file(dest, exts, callback)")
+      local d = dest:gsub("\\", "/")
+      if d:find("..", 1, true) or not (d:find(P.root .. "/art/", 1, true) == 1 or d:find(P.data .. "/" .. rec.id .. "/", 1, true) == 1) then
+        error("Media.pick_file: the destination must be inside kmod/art or this mod's data folder", 2)
+      end
+      return kmod.pick_file(rec.id, d, exts, cb)
+    end,
+    save_file = function(src, name, cb)
+      assert(type(src) == "string" and type(name) == "string" and type(cb) == "function", "Media.save_file(src, name, callback)")
+      local s = src:gsub("\\", "/")
+      if s:find("..", 1, true) or not (s:find(P.root .. "/art/", 1, true) == 1 or s:find(P.data .. "/" .. rec.id .. "/", 1, true) == 1) then
+        error("Media.save_file: the source must be inside kmod/art or this mod's data folder", 2)
+      end
+      return kmod.save_file(rec.id, s, (name:gsub("[\\/:*?\"<>|]", "_")), cb)
+    end,
+    zip = function(srcDir, destZip)
+      local s, d = srcDir:gsub("\\", "/"), destZip:gsub("\\", "/")
+      for _, x in ipairs({ s, d }) do
+        if x:find("..", 1, true) or not (x:find(P.root .. "/art/", 1, true) == 1 or x:find(P.data .. "/" .. rec.id .. "/", 1, true) == 1) then
+          error("Media.zip: both paths must be inside kmod/art or this mod's data folder", 2)
+        end
+      end
+      return kmod.zip(s, d)
+    end,
+  }
   -- Http: needs "permissions": ["network"] in mod.json. Http.get(url [, opts], cb), Http.post(url, body [, opts], cb), Http.request(opts, cb), Http.json(resp)
   local function httpRequest(opts, cb)
     if not rec.permissions.network then error('Http: this mod must declare "permissions": ["network"] in mod.json', 3) end
@@ -736,6 +799,32 @@ function kmod.load_mods()
   for _, rec in ipairs(order) do loadOne(rec) end
   log(string.format("%d package(s), %d loaded", #mods, #order))
   lastLang = kmod.lang_current()
+end
+
+-- Reload ONE Lua mod: forget what it registered (hooks, timers, workers, windows, events, commands), read its folder again and run its main.lua.
+-- Native mods cannot be reloaded one by one (their code stays loaded until the game restarts). Returns true, or false + the reason.
+function kmod.reload_mod(id)
+  local old = kmod._recById and kmod._recById[id]
+  if not old then return false, "unknown mod" end
+  if old.native then return false, "native mods need a restart" end
+  kmod.sync_mods()
+  kmod.release_owner(id)
+  if kmod.ui_close_all then kmod.ui_close_all(id) end
+  for _, list in pairs(kmod._events or {}) do
+    for i = #list, 1, -1 do if list[i].owner == id then table.remove(list, i) end end
+  end
+  if kmod.console_clear_mods then kmod.console_clear_mods(id) end
+  kmod._errCount[id] = nil
+  kmod._status[id] = nil
+  local fresh
+  for _, r in ipairs(kmod.scan_mods()) do if r.id == id then fresh = r end end
+  if not fresh then return false, "the mod folder is gone" end
+  fresh.ok = true
+  for i, r in ipairs(kmod.mods) do if r.id == id then kmod.mods[i] = fresh end end
+  kmod._recById[id] = fresh
+  log("reloading " .. id)
+  if fresh.enabled and #fresh.errors == 0 and not fresh.native then loadOne(fresh) end
+  return true
 end
 
 -- ------------------------------------------------------------------ auto-disable on repeated runtime errors

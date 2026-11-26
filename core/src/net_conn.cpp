@@ -576,11 +576,11 @@ void NetConn_Pump(lua_State* L)
     }
 }
 
-void NetConn_CloseUser(lua_State*)
+void NetConn_CloseUser(lua_State*, const char* only)
 {
     for (size_t i = 0; i < g_conns.size();)
     {
-        if (!g_conns[i]->owner.empty()) { g_conns[i]->events.clear(); Shutdown(g_conns[i]); g_conns.erase(g_conns.begin() + i); }
+        if (!g_conns[i]->owner.empty() && (!only || g_conns[i]->owner == only)) { g_conns[i]->events.clear(); Shutdown(g_conns[i]); g_conns.erase(g_conns.begin() + i); }
         else i++;
     }
 }

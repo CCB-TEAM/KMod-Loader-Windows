@@ -667,6 +667,28 @@ static void RunCanaries()
     }
 }
 
+// ---- start-up timing: how long after the process started things happen, and the two waits that used to be fixed (3 s + 5 s)
+static double SecondsSinceStart()
+{
+    FILETIME created, exitT, kernel, user, now;
+    if (!GetProcessTimes(GetCurrentProcess(), &created, &exitT, &kernel, &user)) return 0;
+    GetSystemTimeAsFileTime(&now);
+    ULARGE_INTEGER a, b;
+    a.LowPart = created.dwLowDateTime; a.HighPart = created.dwHighDateTime;
+    b.LowPart = now.dwLowDateTime; b.HighPart = now.dwHighDateTime;
+    return (double)(b.QuadPart - a.QuadPart) / 1e7;
+}
+
+// kmod/boot/delays.txt: "<ms before the hook> <seconds the game may settle before the mods load>", e.g. "1000 1.5". Defaults 1000 / 1.5.
+static void BootDelays(int& hookWaitMs, double& settleSec)
+{
+    hookWaitMs = 1000; settleSec = 1.5;
+    std::string txt;
+    if (FILE* f = fopen((KModRoot() + "/boot/delays.txt").c_str(), "rb")) { char buf[64] = {}; size_t n = fread(buf, 1, sizeof(buf) - 1, f); fclose(f); txt.assign(buf, n); }
+    int a = 0; double b = 0;
+    if (sscanf(txt.c_str(), "%d %lf", &a, &b) == 2 && a >= 0 && a <= 10000 && b >= 0 && b <= 30) { hookWaitMs = a; settleSec = b; }
+}
+
 // Runs on the game thread (throttled ~20 Hz) from the ProcessEvent hook.
 static void OnGameTick()
 {
@@ -685,12 +707,16 @@ static void OnGameTick()
     { static bool canaries = false; if (!canaries) { canaries = true; RunCanaries(); } }       // before any mod runs
 
     double now = NowSec();
-    if (g_readySince == 0) { g_readySince = now; Log("engine ready"); KMod_MountPendingPaks(); }
+    if (g_readySince == 0) { g_readySince = now; Log("engine ready (t+%.1f s)", SecondsSinceStart()); KMod_MountPendingPaks(); }
     ArmHeartbeat(now);
-    if (now - g_readySince < 5.0) return; // let the game settle
+    static int hookWaitMs = 0; static double settleSec = -1;
+    if (settleSec < 0) BootDelays(hookWaitMs, settleSec);
+    if (now - g_readySince < settleSec) return; // let the game settle
     static bool stableMarked = false;
     if (!stableMarked && now - g_readySince > 20.0) { stableMarked = true; KBoot_MarkStable(); }
 
+    static bool firstLua = true;
+    if (firstLua) { firstLua = false; Log("mods start loading (t+%.1f s)", SecondsSinceStart()); }
     LuaHost_Init();          // no-op after the first call
     LuaHost_Tick(now);
 }
@@ -722,16 +748,16 @@ static void InitThread()
         KLog(KLOG_ERROR, "core", "this game build is not supported (could not locate the engine data): %s. kmod stays inactive.", report.c_str());
         return;
     }
-    Log("resolved: %s", report.c_str());
+    Log("resolved: %s (t+%.1f s)", report.c_str(), SecondsSinceStart());
     Log("build key %s", Resolver_BuildKey().c_str());
-    Sleep(3000);
+    { int waitMs = 0; double settle = 0; BootDelays(waitMs, settle); Sleep(waitMs); }
 
     void* target = reinterpret_cast<void*>(base + Offsets::ProcessEvent);
     Log("image base=0x%llx ProcessEvent=%p objects=%d", (unsigned long long)base, target, InSDKUtils::GetGObjects()->Num());
     void* tramp = nullptr;
     if (!InstallInlineHook(target, reinterpret_cast<void*>(&HookedProcessEvent), &tramp)) { KLog(KLOG_ERROR, "core", "hook install FAILED"); return; }
     g_origPE = reinterpret_cast<ProcessEventFn>(tramp);
-    Log("ProcessEvent hook installed, trampoline=%p", tramp);
+    Log("ProcessEvent hook installed, trampoline=%p (t+%.1f s)", tramp, SecondsSinceStart());
     KLogInstallCrashHandlers();      // the engine installs its own handlers during start-up; (re)install ours on top of them
     KMod_DetectLayout(false);        // verify the engine layout against what this core assumes
     Overlay_Start();                 // the ImGui menu (Insert)

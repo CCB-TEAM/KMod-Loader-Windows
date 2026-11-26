@@ -186,7 +186,22 @@ local function languageRow(box)
   track(c, { kind = "lang", options = values })
 end
 
-local function refresh()
+-- "Reload all mods" row (in the language section) and a "Reload" row for each Lua mod
+local function reloadRow(box, label, info)
+  local b = create("WBP_NUI_MasterTextButton_C")
+  pcall(function() b.ButtonText = kmod.t("reload") end)         -- the button's own text property ("Done" by default): its PreConstruct copies it into the label
+  row(box, label, b)
+  track(b, info)
+  return function()
+    b:SetText(kmod.t("reload"))
+    -- the game's button sets its own default text ("Done") when it finishes building a moment later: say it again then
+    ExecuteWithDelay(150, function() if b:IsValid() then pcall(function() b:SetText(kmod.t("reload")) end) end end)
+    ExecuteWithDelay(600, function() if b:IsValid() then pcall(function() b:SetText(kmod.t("reload")) end) end end)
+  end
+end
+
+local refresh
+function refresh()
   local t0 = os.clock()
   local s0, sm0, p0, pm0 = kmod.perf()
   kmod.perf_sample(true)
@@ -200,7 +215,10 @@ local function refresh()
   header(kmod.t("mods"), "title")
   ui.ctrls = {}
   local mods = kmod.refresh_mods()
-  languageRow(section(kmod.t("language")))
+  local lbox = section(kmod.t("language"))
+  languageRow(lbox)
+  local pending = {}                                           -- SetText on text blocks must run after they are parented
+  pending[#pending + 1] = reloadRow(lbox, kmod.t("reload_all"), { kind = "reloadAll" })
   if #mods == 0 then section(kmod.t("no_mods")); description(kmod.t("no_mods_hint")) end      -- same text block as a mod's description (a row label is squeezed small)
   local pending = {}                                           -- SetText on text blocks must run after they are parented
   for _, rec in ipairs(mods) do
@@ -220,6 +238,7 @@ local function refresh()
       row(box, kmod.t("enabled"), c)
       ui.updating = true; c:SetIsChecked(rec.enabled); ui.updating = false
       track(c, { kind = "enable", rec = rec })
+      if rec.enabled and not rec.native then pending[#pending + 1] = reloadRow(box, kmod.t("reload"), { kind = "reload", rec = rec }) end
       for _, s in ipairs(rec.settings) do
         local ok, err = pcall(settingRow, box, rec, s)
         if not ok then log("setting '" .. tostring(s.id) .. "' of " .. rec.id .. ": " .. tostring(err)) end
@@ -233,7 +252,22 @@ local function refresh()
   log(string.format("  object scans: %d (%.0f ms); top-level ProcessEvent calls: %d (%.0f ms)", s1 - s0, sm1 - sm0, p1 - p0, pm1 - pm0))
 end
 
+local function reloadClicked(self)
+  local info = ui.ctrls and ui.ctrls[self:GetAddress()]
+  if not info then return false end
+  if info.kind == "reloadAll" then
+    log("reloading all mods")
+    kmod.reload_mods()
+  elseif info.kind == "reload" then
+    local ok, err = kmod.reload_mod(info.rec.id)
+    if not ok then log("could not reload " .. info.rec.id .. ": " .. tostring(err)) end
+  else return false end
+  ExecuteWithDelay(300, function() if ui and ui.layout:IsValid() then refresh() end end)     -- not inside the button's own event
+  return true
+end
+
 function H.tab(self)
+  if ui and ui.layout:IsValid() and self ~= ui.tab and reloadClicked(self) then return end
   if ui and ui.layout:IsValid() and self == ui.tab then
     local t = os.clock()
     refresh()

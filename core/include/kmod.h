@@ -24,7 +24,7 @@
 extern "C" {
 #endif
 
-#define KMOD_API_LEVEL 3
+#define KMOD_API_LEVEL 4
 
 #if defined(_WIN32)
 #  define KMOD_PLATFORM_WINDOWS 1
@@ -122,6 +122,23 @@ typedef struct KModApi {
 
     /* ---- level 3 ---- */
     const char* platform;                                 /* "Android" or "Windows" */
+
+    /* ---- level 4: WINDOWS ONLY, and only in a loader built with the ImGui overlay (-DKMOD_OVERLAY=ON); otherwise all null.
+     * Check api->struct_size >= offsetof(KModApi, overlay_add_panel) + sizeof(void*) first.
+     *
+     * overlay_add_panel(draw, user): draw(user) is called once per rendered frame while the overlay is open (Insert), INSIDE an
+     * ImGui frame, so it may call ImGui::Begin / End to make its own floating window. WARNING: it runs on the RENDER thread, not the
+     * game thread: never touch game objects, Lua or hooks from it. Share state with the mod's game-thread code through plain
+     * data guarded by a mutex / atomics (e.g. read it from a Lua function registered with register_lua_function).
+     *
+     * ImGui is NOT exported by the loader. The mod compiles its own copy of the SAME ImGui version (imgui_version) and, at the top
+     * of every draw call, runs:   ImGui::SetAllocatorFunctions(a, f, u) (from imgui_allocators);  ImGui::SetCurrentContext(imgui_context()).
+     * Returns a panel id (> 0) or -1. */
+    int (*overlay_add_panel)(void (*draw)(void* user), void* user);
+    int (*overlay_visible)(void);                         /* 1 while the overlay is open */
+    void* (*imgui_context)(void);                         /* the loader's ImGuiContext* (null until the first frame) */
+    void (*imgui_allocators)(void** alloc, void** free_fn, void** user);   /* ImGui::GetAllocatorFunctions of the loader */
+    const char* imgui_version;                            /* IMGUI_VERSION of the loader's copy, e.g. "1.91.9" */
 } KModApi;
 
 typedef int (*KModStartFn)(const KModApi* api);

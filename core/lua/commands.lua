@@ -96,8 +96,8 @@ function kmod.console_api(rec)
   }
 end
 
-function kmod.console_clear_mods()
-  for name, c in pairs(cmds) do if c.owner ~= "" then cmds[name] = nil end end
+function kmod.console_clear_mods(only)
+  for name, c in pairs(cmds) do if c.owner ~= "" and (not only or c.owner == only) then cmds[name] = nil end end
 end
 
 local function builtin(name, fn, help, usage) register(name, fn, { help = help, usage = usage }, "") end

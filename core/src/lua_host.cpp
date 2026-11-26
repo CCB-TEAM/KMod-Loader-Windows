@@ -1,5 +1,6 @@
 // Lua host: reflection-driven UObject proxies, UE4SS-style globals, hooks, timers, mod loader, dev console.
 // API names follow UE4SS (docs/lua-api) so existing knowledge/scripts carry over.
+#include "gif_decode.h"
 #include "lua_host.h"
 
 #include <zlib.h>
@@ -1313,6 +1314,29 @@ int G_DumpAllActors(lua_State* L) { return DumpObjects(L, true); }
 int G_FStringCtor(lua_State* L) { lua_settop(L, 1); return 1; }          // FString("x") / FAnsiString("x"): strings are plain Lua strings here
 
 // kmod.func_params(path) -> { {name=, type=, out=, ret=}, ... } | nil
+// kmod.keep_alive(obj [, false]): marks an object as a garbage-collection root (RootSet) so the engine does not free it while Lua still uses it
+// (for example a MediaPlayer that no material refers to any more); pass false to let it go again.
+int Kmod_RawFlags(lua_State* L)          // kmod.raw_flags(obj) -> flags, itemObjectMatches, serialNow, serialHandle (debugging: works on dead objects too)
+{
+    LuaObj* o = ToLuaObj(L, 1);
+    if (!o) return luaL_error(L, "expected UObject");
+    FUObjectItem* it = o->idx >= 0 ? ObjRef::ItemAt(o->idx) : nullptr;
+    if (!it) { lua_pushinteger(L, -1); return 1; }
+    lua_pushinteger(L, *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(it) + 8));
+    lua_pushboolean(L, it->Object == o->p);
+    lua_pushinteger(L, SlotSerial(it));
+    lua_pushinteger(L, o->serial);
+    return 4;
+}
+
+int Kmod_ObjectFlags(lua_State* L)       // kmod.object_flags(obj) -> the engine's internal flags of the object (debugging)
+{
+    UObject* o = CheckObj(L, 1);
+    FUObjectItem* it = ObjRef::ItemAt(Rf::IndexOf(o));
+    lua_pushinteger(L, it ? *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(it) + 8) : -1);
+    return 1;
+}
+
 int Kmod_FuncParams(lua_State* L)
 {
     UFunction* fn = static_cast<UFunction*>(FindByPath(luaL_checkstring(L, 1), true));
@@ -1895,6 +1919,7 @@ int Kmod_DebugCrash(lua_State* L)
 }
 #endif
 int Ccb_ReloadMods(lua_State*) { LuaHost_ReloadMods(); return 0; }
+int Ccb_ReleaseOwner(lua_State* L) { LuaHost_ReleaseOwner(luaL_checkstring(L, 1)); return 0; }      // kmod.release_owner(id): forget one mod's hooks, timers, workers... (before reloading it)
 // ---------------------------------------------------------------------------------------------
 // Filesystem helpers for the Lua loader: unzip (.kmod), recursive delete, owner-tagged mod API
 // ---------------------------------------------------------------------------------------------
@@ -2157,6 +2182,233 @@ int Boot_SetActivity(lua_State* L)      // kmod.set_activity("mod", id, what) / 
     return 0;
 }
 
+// kmod.pick_image(modId, destNoExt, fn): the player picks an image (Android: gallery chooser; Windows: file dialog); it is saved to
+// destNoExt + ".png" / its own extension and fn(path) runs on the game thread. fn(nil, "cancelled") if nothing was chosen, fn(nil, message) on errors.
+struct PickWait { int ref; std::string owner; };
+std::map<int, PickWait> g_picks;
+int g_nextPickToken = 1;
+
+void PickDone(int, const char* id, const char* value, void* user)
+{
+    int token = (int)(intptr_t)user;
+    auto it = g_picks.find(token);
+    if (it == g_picks.end()) return;
+    PickWait w = it->second;
+    g_picks.erase(it);
+    if (!L_) return;
+    lua_rawgeti(L_, LUA_REGISTRYINDEX, w.ref);
+    luaL_unref(L_, LUA_REGISTRYINDEX, w.ref);
+    std::string v = value ? value : "";
+    int n = 1;
+    if (v.empty()) { lua_pushnil(L_); lua_pushstring(L_, "cancelled"); n = 2; }
+    else if (v[0] == '!') { lua_pushnil(L_); lua_pushstring(L_, v.c_str() + 1); n = 2; }
+    else
+    {
+        size_t nl = v.find('\n');                      // pick_file: "<path>\n<original file name>"
+        lua_pushstring(L_, v.substr(0, nl).c_str());
+        if (nl != std::string::npos) { lua_pushstring(L_, v.c_str() + nl + 1); n = 2; }
+    }
+    PCall(L_, n, 0, "pick_image", w.owner);
+}
+
+int Ccb_PickImage(lua_State* L)
+{
+    std::string owner = luaL_checkstring(L, 1);
+    std::string dest = luaL_checkstring(L, 2);
+    luaL_checktype(L, 3, LUA_TFUNCTION);
+    lua_pushvalue(L, 3);
+    int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    int token = g_nextPickToken++;
+    g_picks[token] = {ref, owner};
+    if (!NativeUi_PickImage(dest.c_str(), PickDone, (void*)(intptr_t)token))
+    {
+        luaL_unref(L, LUA_REGISTRYINDEX, ref);
+        g_picks.erase(token);
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+int Ccb_PickFile(lua_State* L)    // kmod.pick_file(modId, destNoExt, "ext1,ext2", fn)
+{
+    std::string owner = luaL_checkstring(L, 1), dest = luaL_checkstring(L, 2), exts = luaL_checkstring(L, 3);
+    luaL_checktype(L, 4, LUA_TFUNCTION);
+    lua_pushvalue(L, 4);
+    int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    int token = g_nextPickToken++;
+    g_picks[token] = {ref, owner};
+    if (!NativeUi_PickFile(dest.c_str(), exts.c_str(), PickDone, (void*)(intptr_t)token))
+    {
+        luaL_unref(L, LUA_REGISTRYINDEX, ref);
+        g_picks.erase(token);
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+int Ccb_SaveFile(lua_State* L)    // kmod.save_file(modId, srcPath, suggestedName, fn)
+{
+    std::string owner = luaL_checkstring(L, 1), src = luaL_checkstring(L, 2), name = luaL_checkstring(L, 3);
+    luaL_checktype(L, 4, LUA_TFUNCTION);
+    lua_pushvalue(L, 4);
+    int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    int token = g_nextPickToken++;
+    g_picks[token] = {ref, owner};
+    if (!NativeUi_SaveFile(src.c_str(), name.c_str(), PickDone, (void*)(intptr_t)token))
+    {
+        luaL_unref(L, LUA_REGISTRYINDEX, ref);
+        g_picks.erase(token);
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+// ---- kmod.zip(srcDir, destZip): packs a folder (files only, depth <= 2) into a zip with "stored" entries (the pictures are compressed already).
+// Both paths must be inside kmod/. At most 120 MB in total, 32 MB per file: the limits kmod.unzip accepts.
+uint32_t Crc32Of(const unsigned char* p, size_t n)
+{
+    static uint32_t table[256];
+    static bool ready = false;
+    if (!ready)
+    {
+        for (uint32_t i = 0; i < 256; i++)
+        {
+            uint32_t c = i;
+            for (int k = 0; k < 8; k++) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+            table[i] = c;
+        }
+        ready = true;
+    }
+    uint32_t c = 0xFFFFFFFFu;
+    for (size_t i = 0; i < n; i++) c = table[(c ^ p[i]) & 0xFF] ^ (c >> 8);
+    return c ^ 0xFFFFFFFFu;
+}
+void Put16(std::string& o, uint32_t v) { o += (char)(v & 0xFF); o += (char)((v >> 8) & 0xFF); }
+void Put32(std::string& o, uint32_t v) { Put16(o, v & 0xFFFF); Put16(o, v >> 16); }
+
+void ZipCollect(const std::string& dir, const std::string& rel, int depth, std::vector<std::pair<std::string, std::string>>& out)
+{
+    DIR* d = opendir(dir.c_str());
+    if (!d) return;
+    std::vector<std::string> names;
+    while (dirent* e = readdir(d)) { std::string n = e->d_name; if (n != "." && n != "..") names.push_back(n); }
+    closedir(d);
+    std::sort(names.begin(), names.end());
+    for (const std::string& n : names)
+    {
+        struct stat st;
+        std::string full = dir + "/" + n, r = rel.empty() ? n : rel + "/" + n;
+        if (stat(full.c_str(), &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) { if (depth < 2) ZipCollect(full, r, depth + 1, out); }
+        else out.push_back({r, full});
+    }
+}
+
+bool ZipDir(const std::string& src, const std::string& destZip, std::string& err)
+{
+    std::vector<std::pair<std::string, std::string>> files;
+    ZipCollect(src, "", 0, files);
+    if (files.empty()) { err = "nothing to pack"; return false; }
+    std::string body, central;
+    size_t total = 0;
+    for (auto& f : files)
+    {
+        std::string data = ReadFileStr(f.second);
+        if (data.size() > (32u << 20)) { err = "file too large: " + f.first; return false; }
+        total += data.size();
+        if (total > (120u << 20)) { err = "too much data to pack"; return false; }
+        uint32_t crc = Crc32Of(reinterpret_cast<const unsigned char*>(data.data()), data.size());
+        uint32_t offset = (uint32_t)body.size();
+        // local header
+        Put32(body, 0x04034b50); Put16(body, 20); Put16(body, 0x0800); Put16(body, 0); Put16(body, 0); Put16(body, 0x21);
+        Put32(body, crc); Put32(body, (uint32_t)data.size()); Put32(body, (uint32_t)data.size());
+        Put16(body, (uint32_t)f.first.size()); Put16(body, 0);
+        body += f.first; body += data;
+        // central directory entry
+        Put32(central, 0x02014b50); Put16(central, 20); Put16(central, 20); Put16(central, 0x0800); Put16(central, 0); Put16(central, 0); Put16(central, 0x21);
+        Put32(central, crc); Put32(central, (uint32_t)data.size()); Put32(central, (uint32_t)data.size());
+        Put16(central, (uint32_t)f.first.size()); Put16(central, 0); Put16(central, 0); Put16(central, 0); Put16(central, 0);
+        Put32(central, 0); Put32(central, offset);
+        central += f.first;
+    }
+    std::string end;
+    Put32(end, 0x06054b50); Put16(end, 0); Put16(end, 0); Put16(end, (uint32_t)files.size()); Put16(end, (uint32_t)files.size());
+    Put32(end, (uint32_t)central.size()); Put32(end, (uint32_t)body.size()); Put16(end, 0);
+    std::string dir = destZip.substr(0, destZip.rfind('/'));
+    if (destZip.rfind('/') != std::string::npos) MkdirAll(dir);
+    FILE* f = fopen(destZip.c_str(), "wb");
+    if (!f) { err = "cannot write " + destZip; return false; }
+    fwrite(body.data(), 1, body.size(), f); fwrite(central.data(), 1, central.size(), f); fwrite(end.data(), 1, end.size(), f);
+    fclose(f);
+    return true;
+}
+
+// info, err = kmod.gif_frames(src, outDir, maxSide, maxFrames [, cropX, cropY, cropSide]): decodes a GIF into outDir/f001.png...; info = { width=, height=, delays={ms...} }
+int Ccb_GifFrames(lua_State* L)
+{
+    std::string src = luaL_checkstring(L, 1), dst = luaL_checkstring(L, 2), err;
+    int maxSide = (int)luaL_optinteger(L, 3, 480), maxFrames = (int)luaL_optinteger(L, 4, 60);
+    std::string root = KModRoot() + "/", priv = KPrivateRoot() + "/";     // frames may go into the private folder (no gallery sees it)
+    for (const std::string* p : {&src, &dst})
+    {
+        bool ok = p->compare(0, root.size(), root) == 0 || (p == &dst && p->compare(0, priv.size(), priv) == 0);
+        if (!ok || p->find("..") != std::string::npos) return luaL_error(L, "gif_frames: refusing path %s", p->c_str());
+    }
+    if (maxSide < 32) maxSide = 32;
+    if (maxSide > 1024) maxSide = 1024;
+    if (maxFrames < 1) maxFrames = 1;
+    if (maxFrames > 200) maxFrames = 200;
+    int cropv[3] = { 0, 0, 0 };
+    bool hasCrop = lua_gettop(L) >= 7 && !lua_isnil(L, 5);
+    if (hasCrop) { cropv[0] = (int)luaL_checkinteger(L, 5); cropv[1] = (int)luaL_checkinteger(L, 6); cropv[2] = (int)luaL_checkinteger(L, 7); }
+    GifFrames r;
+    if (!GifDecodeToPngs(src, dst, maxSide, maxFrames, hasCrop ? cropv : nullptr, r, err)) { lua_pushnil(L); lua_pushstring(L, err.c_str()); return 2; }
+    lua_newtable(L);
+    lua_pushinteger(L, r.width); lua_setfield(L, -2, "width");
+    lua_pushinteger(L, r.height); lua_setfield(L, -2, "height");
+    lua_newtable(L);
+    for (size_t k = 0; k < r.delaysMs.size(); k++) { lua_pushinteger(L, r.delaysMs[k]); lua_rawseti(L, -2, (lua_Integer)k + 1); }
+    lua_setfield(L, -2, "delays");
+    return 1;
+}
+
+int Ccb_Zip(lua_State* L)    // ok, err = kmod.zip(srcDir, destZip)
+{
+    std::string src = luaL_checkstring(L, 1), dst = luaL_checkstring(L, 2), err;
+    std::string root = KModRoot() + "/";
+    for (const std::string* p : {&src, &dst})
+        if (p->compare(0, root.size(), root) != 0 || p->find("..") != std::string::npos) return luaL_error(L, "zip: refusing path %s", p->c_str());
+    if (ZipDir(src, dst, err)) { lua_pushboolean(L, 1); return 1; }
+    lua_pushboolean(L, 0); lua_pushstring(L, err.c_str());
+    return 2;
+}
+
+int Ccb_KeyDown(lua_State* L) { lua_pushboolean(L, Platform_KeyDown(luaL_checkstring(L, 1))); return 1; }   // kmod.key_down("CTRL+F8")
+
+int Ccb_Base64(lua_State* L)    // kmod.base64(bytes) -> base64 text
+{
+    size_t n = 0;
+    const unsigned char* d = reinterpret_cast<const unsigned char*>(luaL_checklstring(L, 1, &n));
+    static const char* T = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve((n + 2) / 3 * 4);
+    for (size_t i = 0; i < n; i += 3)
+    {
+        uint32_t v = (uint32_t)d[i] << 16 | (i + 1 < n ? (uint32_t)d[i + 1] << 8 : 0) | (i + 2 < n ? d[i + 2] : 0);
+        out += T[(v >> 18) & 63]; out += T[(v >> 12) & 63];
+        out += i + 1 < n ? T[(v >> 6) & 63] : '=';
+        out += i + 2 < n ? T[v & 63] : '=';
+    }
+    lua_pushlstring(L, out.data(), out.size());
+    return 1;
+}
+
 int Ccb_ModApi(lua_State* L)   // kmod.mod_api(modId) -> owner-tagged RegisterHook / ExecuteWithDelay / ... for that mod's environment
 {
     const char* name = luaL_checkstring(L, 1);
@@ -2375,6 +2627,7 @@ void LuaHost_Init()
     lua_pushcfunction(L, Ccb_Exists); lua_setfield(L, -2, "exists");
     lua_pushcfunction(L, Ccb_Mkdir); lua_setfield(L, -2, "mkdir");
     lua_pushcfunction(L, Ccb_ReloadMods); lua_setfield(L, -2, "reload_mods");
+    lua_pushcfunction(L, Ccb_ReleaseOwner); lua_setfield(L, -2, "release_owner");
     lua_pushcfunction(L, Ccb_Unzip); lua_setfield(L, -2, "unzip");
     lua_pushcfunction(L, Ccb_Rmtree); lua_setfield(L, -2, "rmtree");
     lua_pushcfunction(L, Ccb_CopyTree); lua_setfield(L, -2, "copytree");
@@ -2382,6 +2635,15 @@ void LuaHost_Init()
     lua_pushcfunction(L, Kmod_Perf); lua_setfield(L, -2, "perf");
     lua_pushcfunction(L, Kmod_PerfSample); lua_setfield(L, -2, "perf_sample");
     lua_pushcfunction(L, Ccb_ModApi); lua_setfield(L, -2, "mod_api");
+    lua_pushcfunction(L, Ccb_KeyDown); lua_setfield(L, -2, "key_down");
+    lua_pushcfunction(L, Ccb_Base64); lua_setfield(L, -2, "base64");
+    lua_pushcfunction(L, Ccb_PickImage); lua_setfield(L, -2, "pick_image");
+    lua_pushcfunction(L, Ccb_PickFile); lua_setfield(L, -2, "pick_file");
+    lua_pushcfunction(L, Ccb_SaveFile); lua_setfield(L, -2, "save_file");
+    lua_pushcfunction(L, Ccb_Zip); lua_setfield(L, -2, "zip");
+    lua_pushcfunction(L, Ccb_GifFrames); lua_setfield(L, -2, "gif_frames");
+    lua_pushcfunction(L, Kmod_ObjectFlags); lua_setfield(L, -2, "object_flags");
+    lua_pushcfunction(L, Kmod_RawFlags); lua_setfield(L, -2, "raw_flags");
     lua_pushcfunction(L, Kmod_Log); lua_setfield(L, -2, "log");
     lua_pushcfunction(L, Kmod_Signatures); lua_setfield(L, -2, "signatures");
     lua_pushcfunction(L, Kmod_FuncParams); lua_setfield(L, -2, "func_params");
@@ -2437,28 +2699,36 @@ void LuaHost_Init()
     CallLoadMods();
 }
 
-void LuaHost_ReloadMods()
+void LuaHost_ReleaseOwner(const char* only)
 {
     // drop everything registered by user mods (owner != ""); built-in scripts (owner "") stay
     if (!L_) return;
-    Worker_CloseUser(L_);
-    Http_CancelUser(L_);
-    NetConn_CloseUser(L_);
+    Worker_CloseUser(L_, only);
+    Http_CancelUser(L_, only);
+    NetConn_CloseUser(L_, only);
     for (auto& kv : g_hooks)
     {
         auto& v = kv.second;
         for (size_t i = 0; i < v.size();)
-            if (!v[i].owner.empty()) { luaL_unref(L_, LUA_REGISTRYINDEX, v[i].preRef); luaL_unref(L_, LUA_REGISTRYINDEX, v[i].postRef); v.erase(v.begin() + i); }
+            if (!v[i].owner.empty() && (!only || v[i].owner == only)) { luaL_unref(L_, LUA_REGISTRYINDEX, v[i].preRef); luaL_unref(L_, LUA_REGISTRYINDEX, v[i].postRef); v.erase(v.begin() + i); }
             else i++;
     }
     for (size_t i = 0; i < g_timers.size();)
-        if (!g_timers[i].owner.empty()) { luaL_unref(L_, LUA_REGISTRYINDEX, g_timers[i].fnRef); g_timers.erase(g_timers.begin() + i); } else i++;
+        if (!g_timers[i].owner.empty() && (!only || g_timers[i].owner == only)) { luaL_unref(L_, LUA_REGISTRYINDEX, g_timers[i].fnRef); g_timers.erase(g_timers.begin() + i); } else i++;
     for (size_t i = 0; i < g_newObjWatches.size();)
-        if (!g_newObjWatches[i].owner.empty()) { luaL_unref(L_, LUA_REGISTRYINDEX, g_newObjWatches[i].fnRef); g_newObjWatches.erase(g_newObjWatches.begin() + i); } else i++;
+        if (!g_newObjWatches[i].owner.empty() && (!only || g_newObjWatches[i].owner == only)) { luaL_unref(L_, LUA_REGISTRYINDEX, g_newObjWatches[i].fnRef); g_newObjWatches.erase(g_newObjWatches.begin() + i); } else i++;
     for (size_t i = 0; i < g_fastTimers.size();)
-        if (!g_fastTimers[i].owner.empty()) { luaL_unref(L_, LUA_REGISTRYINDEX, g_fastTimers[i].fnRef); g_fastTimers.erase(g_fastTimers.begin() + i); } else i++;
+        if (!g_fastTimers[i].owner.empty() && (!only || g_fastTimers[i].owner == only)) { luaL_unref(L_, LUA_REGISTRYINDEX, g_fastTimers[i].fnRef); g_fastTimers.erase(g_fastTimers.begin() + i); } else i++;
+    for (auto it = g_picks.begin(); it != g_picks.end();)
+        if (!it->second.owner.empty() && (!only || it->second.owner == only)) { luaL_unref(L_, LUA_REGISTRYINDEX, it->second.ref); it = g_picks.erase(it); } else ++it;
     g_anyFastWatch = false;
     for (auto& w : g_newObjWatches) if (w.fast) g_anyFastWatch = true;
+}
+
+void LuaHost_ReloadMods()
+{
+    if (!L_) return;
+    LuaHost_ReleaseOwner(nullptr);
     EmitLine("[mod] reloading mods");
     CallLoadMods();
 }

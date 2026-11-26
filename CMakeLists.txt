@@ -59,7 +59,7 @@ target_include_directories(kmod_core PRIVATE
   ${CMAKE_CURRENT_BINARY_DIR}/gen/sdk ${KMOD_SDK_DIR} ${KMOD_SDK_DIR}/SDK ${KMOD_LUA_DIR}/include ${CMAKE_CURRENT_BINARY_DIR}/gen)
 target_compile_options(kmod_core PRIVATE /W3 /wd4244 /wd4267 /wd4996 /wd4800 /bigobj /EHsc /utf-8 /O2 /FI${CMAKE_CURRENT_SOURCE_DIR}/core/src/win/compat.h)
 target_compile_definitions(kmod_core PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS KMOD_PLATFORM_WINDOWS=1 $<$<BOOL:${KMOD_DEV}>:KMOD_DEV=1> $<$<BOOL:${KMOD_OVERLAY}>:KMOD_OVERLAY=1>)
-target_link_libraries(kmod_core PRIVATE Zydis winhttp ws2_32 secur32 dbghelp version shlwapi dxguid imm32)
+target_link_libraries(kmod_core PRIVATE Zydis winhttp ws2_32 secur32 dbghelp version shlwapi dxguid imm32 comdlg32)
 set_target_properties(kmod_core PROPERTIES OUTPUT_NAME kmod_core)
 
 # Embed the built-in Lua scripts (kModLoaderLua, kModManagerLua, ...) as byte arrays: MSVC limits string literals to 64 KB

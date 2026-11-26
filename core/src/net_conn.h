@@ -12,4 +12,4 @@ int NetConn_Open(lua_State* L);     // kmod.net_open(owner, kind, opts) -> id   
 int NetConn_Send(lua_State* L);     // kmod.net_send(id, data [, binary]) -> bool
 int NetConn_Close(lua_State* L);    // kmod.net_close(id)
 void NetConn_Pump(lua_State* L);    // game thread, every tick
-void NetConn_CloseUser(lua_State* L);   // close every mod's connections (reload / disable)
+void NetConn_CloseUser(lua_State* L, const char* only = nullptr);   // close every mod's connections (reload / disable)

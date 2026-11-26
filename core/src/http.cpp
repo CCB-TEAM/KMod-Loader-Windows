@@ -308,11 +308,11 @@ void Http_Pump(lua_State* L)
     }
 }
 
-void Http_CancelUser(lua_State* L)
+void Http_CancelUser(lua_State* L, const char* only)
 {
     for (auto it = g_pending.begin(); it != g_pending.end();)
     {
-        if (!it->second.owner.empty())
+        if (!it->second.owner.empty() && (!only || it->second.owner == only))
         {
             luaL_unref(L, LUA_REGISTRYINDEX, it->second.cbRef);
             if (it->second.progressRef != LUA_NOREF) luaL_unref(L, LUA_REGISTRYINDEX, it->second.progressRef);

@@ -81,6 +81,11 @@ struct Dx11
     ID3D11DeviceContext* ctx = nullptr;
 } g11;
 
+// ---------------------------------------------------------------------------------------------------------------- native mod panels
+struct Panel { void (*draw)(void*); void* user; };
+std::mutex g_panelMu;
+std::vector<Panel> g_panels;
+
 // ---------------------------------------------------------------------------------------------------------------- UI
 struct ModRow { std::string id, title, version, status; bool enabled; };
 
@@ -216,6 +221,12 @@ void BuildUi()
         }
     }
     ImGui::End();
+    // windows of native mods (KModApi::overlay_add_panel)
+    {
+        std::vector<Panel> panels;
+        { std::lock_guard<std::mutex> g(g_panelMu); panels = g_panels; }
+        for (const Panel& p : panels) p.draw(p.user);
+    }
     if (!open) g_visible = false;
     if (!g_visible) io.MouseDrawCursor = false;
 }
@@ -519,5 +530,24 @@ void Overlay_SetSnapshot(const std::string& text)
 }
 
 std::string Overlay_Status() { return g_status; }
+
+int Overlay_AddPanel(void (*draw)(void*), void* user)
+{
+    if (!draw) return -1;
+    std::lock_guard<std::mutex> g(g_panelMu);
+    g_panels.push_back({draw, user});
+    return (int)g_panels.size();
+}
+
+void* Overlay_Context() { return g_ready ? ImGui::GetCurrentContext() : nullptr; }
+
+void Overlay_Allocators(void** alloc, void** free_fn, void** user)
+{
+    ImGuiMemAllocFunc a = nullptr; ImGuiMemFreeFunc f = nullptr; void* u = nullptr;
+    ImGui::GetAllocatorFunctions(&a, &f, &u);
+    *alloc = reinterpret_cast<void*>(a); *free_fn = reinterpret_cast<void*>(f); *user = u;
+}
+
+const char* Overlay_ImGuiVersion() { return IMGUI_VERSION; }
 
 #endif   // KMOD_OVERLAY
