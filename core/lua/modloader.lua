@@ -463,10 +463,52 @@ local function saveOwners(t)
   os.rename(OWNERS .. ".tmp", OWNERS)
 end
 
+-- Windows sets the pak load order by renaming (the engine takes a pak's priority from its name): X_P.pak becomes
+-- X_P.kmod_03_P.pak, sidecar files alike. pak-owners.json and mod.json keep the original name; these map between the two
+-- (the launcher's pakname.rs and the core's KMod_ApplyStagedPaks do the same).
+local function pakLogical(name)
+  local stem, ext = name:match("^(.*)%.([^%.]+)$")
+  if not stem then return name end
+  repeat
+    local base = stem:match("^(.+)%.kmod_%d+_P$")
+    if base then stem = base end
+  until not base
+  return stem .. "." .. ext
+end
+
+-- names in the paks folder (without .disable) whose original name is `name`; the exact name first
+local function pakOnDisk(name)
+  local out, seen = {}, {}
+  if kmod.exists(P.paks .. "/" .. name) or kmod.exists(P.paks .. "/" .. name .. ".disable") then out[1] = name; seen[name:lower()] = true end
+  for _, e in ipairs(kmod.listdir(P.paks)) do
+    local plain = e.name:gsub("%.disable$", "")
+    if not e.dir and not seen[plain:lower()] and pakLogical(plain):lower() == name:lower() then
+      out[#out + 1] = plain; seen[plain:lower()] = true
+    end
+  end
+  return out
+end
+
+-- the name a file is written under in the paks folder: the name it has now, else the order tag of its .pak
+local function pakTarget(name)
+  for _, n in ipairs(pakOnDisk(name)) do if n ~= name then return n end end
+  local stem, ext = name:match("^(.*)%.([^%.]+)$")
+  if stem then
+    for _, n in ipairs(pakOnDisk(stem .. ".pak")) do
+      local tag = n:match("(%.kmod_%d+_P)%.[^%.]+$")
+      if tag then return stem .. tag .. "." .. ext end
+    end
+  end
+  return name
+end
+
 -- where a pak file of that name currently is: waiting in the staged folder, in the paks folder, or switched off there
 local function pakPath(name)
-  for _, p in ipairs({ P.pak_staged .. "/" .. name, P.paks .. "/" .. name, P.paks .. "/" .. name .. ".disable" }) do
-    if kmod.exists(p) then return p end
+  if kmod.exists(P.pak_staged .. "/" .. name) then return P.pak_staged .. "/" .. name end
+  for _, n in ipairs(pakOnDisk(name)) do
+    for _, p in ipairs({ P.paks .. "/" .. n, P.paks .. "/" .. n .. ".disable" }) do
+      if kmod.exists(p) then return p end
+    end
   end
   return nil
 end
@@ -571,7 +613,7 @@ local function applyPaks(zipPath, def, wanted, plan)
     if sha ~= w.sha256 then undo(); return false, "cannot install " .. w.name .. ": " .. tostring(err or "checksum mismatch") end
   end
   for _, w in ipairs(plan.write) do
-    local dst = dir .. "/" .. w.name
+    local dst = dir .. "/" .. (plan.staged and w.name or pakTarget(w.name))     -- staged files are placed by the core
     os.remove(P.pak_staged .. "/" .. w.name .. ".del")
     os.remove(dst)
     local ok, err = os.rename(dst .. ".tmp", dst)

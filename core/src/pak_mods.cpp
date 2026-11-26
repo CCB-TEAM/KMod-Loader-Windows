@@ -488,6 +488,66 @@ std::string KPaksRoot()
 
 std::string KPakStagedRoot() { return KModRoot() + "/pak-staged"; }
 
+// Windows sets the pak load order by renaming (the engine takes a pak's priority from its name): X_P.pak becomes
+// X_P.kmod_03_P.pak, sidecar files alike. Staged files carry the original name; they replace the file under its current
+// name so it keeps its place. (Same rules as modloader.lua's pakLogical / pakTarget and the launcher's pakname.rs.)
+static std::string StripOrderTag(std::string stem)
+{
+    for (;;)
+    {
+        if (stem.size() < 2 || stem.compare(stem.size() - 2, 2, "_P") != 0) return stem;
+        size_t at = stem.rfind(".kmod_");
+        if (at == std::string::npos || at == 0) return stem;
+        const std::string n = stem.substr(at + 6, stem.size() - 2 - (at + 6));
+        if (n.empty() || n.find_first_not_of("0123456789") != std::string::npos) return stem;
+        stem.resize(at);
+    }
+}
+
+static std::string LogicalPakName(const std::string& name)
+{
+    size_t dot = name.rfind('.');
+    if (dot == std::string::npos) return name;
+    return StripOrderTag(name.substr(0, dot)) + name.substr(dot);
+}
+
+static bool SameI(const std::string& a, const std::string& b)
+{
+    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) { return tolower((unsigned char)x) == tolower((unsigned char)y); });
+}
+
+// names in the paks folder (without .disable) whose original name is `name`
+static std::vector<std::string> PakOnDisk(const std::string& paks, const std::string& name)
+{
+    std::vector<std::string> out;
+    if (DIR* d = opendir(paks.c_str()))
+    {
+        while (dirent* e = readdir(d))
+        {
+            std::string n = e->d_name;
+            if (EndsWithI(n, ".disable")) n.resize(n.size() - 8);
+            if (SameI(LogicalPakName(n), name) && std::find(out.begin(), out.end(), n) == out.end()) out.push_back(n);
+        }
+        closedir(d);
+    }
+    return out;
+}
+
+// the name `name` is written under: its renamed name, else the order tag of its .pak, else the name itself
+static std::string PakTarget(const std::string& paks, const std::string& name)
+{
+    for (const std::string& n : PakOnDisk(paks, name)) if (n != name) return n;
+    size_t dot = name.rfind('.');
+    if (dot == std::string::npos) return name;
+    const std::string stem = name.substr(0, dot);
+    for (const std::string& n : PakOnDisk(paks, stem + ".pak"))
+    {
+        const std::string diskStem = n.substr(0, n.rfind('.'));
+        if (diskStem.size() > stem.size() && StripOrderTag(diskStem) == stem) return diskStem + name.substr(dot);
+    }
+    return name;
+}
+
 void KMod_ApplyStagedPaks()
 {
     const std::string staged = KPakStagedRoot(), paks = KPaksRoot();
@@ -509,14 +569,18 @@ void KMod_ApplyStagedPaks()
         {
             const std::string base = n.substr(0, n.size() - 4);
             if (!PakFileName(base)) { unlink(from.c_str()); continue; }
-            bool a = DeleteIfThere(paks + "/" + base), b = DeleteIfThere(paks + "/" + base + ".disable");
+            bool a = true, b = true;
+            std::vector<std::string> there = PakOnDisk(paks, base);
+            if (there.empty()) there.push_back(base);
+            for (const std::string& n : there) { a = DeleteIfThere(paks + "/" + n) && a; b = DeleteIfThere(paks + "/" + n + ".disable") && b; }
             if (a && b) { unlink(from.c_str()); KLog(KLOG_INFO, "core", "pak update: removed %s", base.c_str()); }
             else KLog(KLOG_WARN, "core", "pak update: could not remove %s (in use?); trying again next start", base.c_str());
             continue;
         }
         if (!PakFileName(n)) continue;
-        std::string to = paks + "/" + n;
-        const std::string set = paks + "/" + n.substr(0, n.rfind('.')) + ".pak.disable";
+        const std::string disk = PakTarget(paks, n);
+        std::string to = paks + "/" + disk;
+        const std::string set = paks + "/" + disk.substr(0, disk.rfind('.')) + ".pak.disable";
         if (Exists(to + ".disable") || Exists(set)) { DeleteIfThere(to); to += ".disable"; }      // a pak the player switched off stays off
         if (MoveOver(from, to)) KLog(KLOG_INFO, "core", "pak update: installed %s", n.c_str());
         else KLog(KLOG_WARN, "core", "pak update: could not replace %s (in use?); trying again next start", n.c_str());
