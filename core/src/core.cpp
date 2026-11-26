@@ -26,6 +26,7 @@
 #include "lua_host.h"
 #include "resolver.h"
 #include "kmod_boot.h"
+#include "pak_mods.h"
 #include "net_redirect.h"
 #include "reflect.h"
 #include "x64.h"
@@ -780,6 +781,7 @@ extern "C" __declspec(dllexport) void kmod_start()
     KLogInit();
     if (kDevBuild) DevConsole_Start();
     EnsureUserFolders();
+    KMod_ApplyStagedPaks();      // pak updates staged by the last run, before the game mounts its paks
     KBoot_Init();
     atexit([] { KBoot_MarkStable(); });          // a normal exit counts as a finished start (a crash or a kill does not)
     KLogInstallCrashHandlers();

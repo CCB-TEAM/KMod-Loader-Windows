@@ -187,16 +187,17 @@ local function languageRow(box)
 end
 
 -- "Reload all mods" row (in the language section) and a "Reload" row for each Lua mod
-local function reloadRow(box, label, info)
+local function reloadRow(box, label, info, text)
+  text = text or "reload"
   local b = create("WBP_NUI_MasterTextButton_C")
-  pcall(function() b.ButtonText = kmod.t("reload") end)         -- the button's own text property ("Done" by default): its PreConstruct copies it into the label
+  pcall(function() b.ButtonText = kmod.t(text) end)         -- the button's own text property ("Done" by default): its PreConstruct copies it into the label
   row(box, label, b)
   track(b, info)
   return function()
-    b:SetText(kmod.t("reload"))
+    b:SetText(kmod.t(text))
     -- the game's button sets its own default text ("Done") when it finishes building a moment later: say it again then
-    ExecuteWithDelay(150, function() if b:IsValid() then pcall(function() b:SetText(kmod.t("reload")) end) end end)
-    ExecuteWithDelay(600, function() if b:IsValid() then pcall(function() b:SetText(kmod.t("reload")) end) end end)
+    ExecuteWithDelay(150, function() if b:IsValid() then pcall(function() b:SetText(kmod.t(text)) end) end end)
+    ExecuteWithDelay(600, function() if b:IsValid() then pcall(function() b:SetText(kmod.t(text)) end) end end)
   end
 end
 
@@ -219,6 +220,19 @@ function refresh()
   languageRow(lbox)
   local pending = {}                                           -- SetText on text blocks must run after they are parented
   pending[#pending + 1] = reloadRow(lbox, kmod.t("reload_all"), { kind = "reloadAll" })
+  if kmod.pak_restart then description(kmod.t("pak_restart")) end
+  local waiting = {}
+  for file in pairs(kmod.pak_pending or {}) do waiting[#waiting + 1] = file end
+  table.sort(waiting)
+  for _, file in ipairs(waiting) do                          -- packages that change pak files wait for the player here
+    local info = kmod.pak_pending[file]
+    local box = section(kmod.t("pak_pending") .. ": " .. info.name .. " " .. info.version)
+    local lines = {}
+    local function list(key, t) if t and #t > 0 then lines[#lines + 1] = kmod.t(key) .. ": " .. table.concat(t, ", ") end end
+    list("pak_write", info.write); list("pak_remove", info.remove); list("pak_conflict", info.conflicts)
+    if #lines > 0 then description(table.concat(lines, "\n")) end
+    pending[#pending + 1] = reloadRow(box, file, { kind = "pakConfirm", file = file }, "pak_confirm")
+  end
   if #mods == 0 then section(kmod.t("no_mods")); description(kmod.t("no_mods_hint")) end      -- same text block as a mod's description (a row label is squeezed small)
   local pending = {}                                           -- SetText on text blocks must run after they are parented
   for _, rec in ipairs(mods) do
@@ -258,6 +272,9 @@ local function reloadClicked(self)
   if info.kind == "reloadAll" then
     log("reloading all mods")
     kmod.reload_mods()
+  elseif info.kind == "pakConfirm" then
+    local ok, err = kmod.confirm_paks(info.file)
+    if ok then kmod.reload_mods() else log("could not install the paks of " .. info.file .. ": " .. tostring(err)) end
   elseif info.kind == "reload" then
     local ok, err = kmod.reload_mod(info.rec.id)
     if not ok then log("could not reload " .. info.rec.id .. ": " .. tostring(err)) end

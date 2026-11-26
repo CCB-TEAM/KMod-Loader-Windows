@@ -126,11 +126,14 @@ function kmod.option_label(rec, s, value) return kmod.rec_text(rec, "settings." 
 -- strings of the manager UI itself
 local UI = {
   en = { mods = "Mods", version = "Version", enabled = "Enabled", language = "Language", status = "Status",
-         no_mods = "No mods found", no_mods_hint = "Put mod folders or .kmod files in kmod/mods", auto = "Auto (game language)", reload = "Reload", reload_all = "Reload all mods" },
+         no_mods = "No mods found", no_mods_hint = "Put mod folders or .kmod files in kmod/mods", auto = "Auto (game language)", reload = "Reload", reload_all = "Reload all mods",
+         pak_pending = "Pak update waiting", pak_confirm = "Install", pak_write = "Writes", pak_remove = "Removes", pak_conflict = "Overwrites files it did not install", pak_restart = "Pak changes take effect after restarting the game." },
   ["zh-CN"] = { mods = "模组", version = "版本", enabled = "启用", language = "语言", status = "状态",
-                no_mods = "未找到模组", no_mods_hint = "把模组文件夹或 .kmod 文件放进 kmod/mods", auto = "自动（跟随游戏）", reload = "重载", reload_all = "重载所有模组" },
+                no_mods = "未找到模组", no_mods_hint = "把模组文件夹或 .kmod 文件放进 kmod/mods", auto = "自动（跟随游戏）", reload = "重载", reload_all = "重载所有模组",
+                pak_pending = "Pak 更新待确认", pak_confirm = "安装", pak_write = "写入", pak_remove = "删除", pak_conflict = "将覆盖不是它安装的文件", pak_restart = "Pak 改动在重启游戏后生效。" },
   ["zh-TW"] = { mods = "模組", version = "版本", enabled = "啟用", language = "語言", status = "狀態",
-                no_mods = "找不到模組", no_mods_hint = "把模組資料夾或 .kmod 檔案放進 kmod/mods", auto = "自動（跟隨遊戲）", reload = "重載", reload_all = "重載所有模組" },
+                no_mods = "找不到模組", no_mods_hint = "把模組資料夾或 .kmod 檔案放進 kmod/mods", auto = "自動（跟隨遊戲）", reload = "重載", reload_all = "重載所有模組",
+                pak_pending = "Pak 更新待確認", pak_confirm = "安裝", pak_write = "寫入", pak_remove = "刪除", pak_conflict = "將覆蓋不是它安裝的檔案", pak_restart = "Pak 變更在重新啟動遊戲後生效。" },
 }
 function kmod.t(key)
   for _, tag in ipairs(langChain(kmod.lang_current())) do
@@ -352,7 +355,7 @@ local function inspect(folder)
   end
   if kmod.exists(rec.dir .. "/main.lua") then rec.entry = rec.dir .. "/main.lua"
   elseif kmod.exists(rec.dir .. "/Scripts/main.lua") then rec.entry = rec.dir .. "/Scripts/main.lua"; rec.warnings[#rec.warnings + 1] = "legacy Scripts/main.lua"
-  elseif not rec.native then rec.errors[#rec.errors + 1] = "main.lua missing" end
+  elseif not rec.native and not def.paks then rec.errors[#rec.errors + 1] = "main.lua missing" end      -- a package may be paks only
   rec.enabled = state.enabled[rec.id] == true
   loadValues(rec)
   return rec
@@ -434,8 +437,188 @@ local function migrate()
   end
 end
 
+-- ------------------------------------------------------------------ pak files shipped inside a .kmod
+-- mod.json "paks": [ {"file": "paks/…/X_P.pak", "sha256": "…", "platforms": ["Windows"]}, … ]. Every file under paks/ is declared
+-- with its checksum (a pak has no version number). They are installed into the normal paks folder and are ordinary pak mods
+-- from then on; kmod/pak-owners.json remembers which package put which file there. A first installation that overwrites
+-- nothing happens at once. Everything else (an update, a file with the same name) waits until the player confirms, and is
+-- swapped in by the core at the next game start (pak-staged/), because a mounted pak cannot be replaced.
+local PAK_EXT = { pak = true, utoc = true, ucas = true, sig = true }
+local GAME_PAKS = { "kards-windows", "kards-android", "pakchunk", "global." }
+local OWNERS = P.root .. "/pak-owners.json"
+local pakApproved = {}                                    -- package file name -> true: the player agreed to its pak changes
+kmod.pak_pending = kmod.pak_pending or {}                 -- package file name -> what is waiting for the player
+kmod.pak_restart = kmod.pak_restart or false              -- pak changes that need a game restart
+
+local function loadOwners()
+  local t = json.decode(readFile(OWNERS) or "{}")
+  if type(t) ~= "table" then t = {} end
+  if type(t.mods) ~= "table" then t.mods = {} end
+  return t
+end
+
+local function saveOwners(t)
+  writeFile(OWNERS .. ".tmp", json.encode(t))
+  os.remove(OWNERS)
+  os.rename(OWNERS .. ".tmp", OWNERS)
+end
+
+-- where a pak file of that name currently is: waiting in the staged folder, in the paks folder, or switched off there
+local function pakPath(name)
+  for _, p in ipairs({ P.pak_staged .. "/" .. name, P.paks .. "/" .. name, P.paks .. "/" .. name .. ".disable" }) do
+    if kmod.exists(p) then return p end
+  end
+  return nil
+end
+
+local function pakPlatform(v)
+  if v == nil then return true end
+  if type(v) == "string" then v = { v } end
+  if type(v) ~= "table" then return nil end
+  for _, p in ipairs(v) do if tostring(p):lower() == kmod.platform:lower() then return true end end
+  return false
+end
+
+-- the package's pak files for this platform, after checking every declaration against the zip; nil + reason when they do not match
+local function packagePaks(zipPath, def)
+  local entries, err = kmod.zip_list(zipPath)
+  if not entries then return nil, "unzip failed: " .. tostring(err) end
+  local inZip = {}
+  for _, e in ipairs(entries) do if e.name:lower():sub(1, 5) == "paks/" then inZip[e.name] = e.size end end
+  if def.paks == nil then
+    if next(inZip) then return nil, 'files in paks/ must be listed in "paks" of mod.json' end
+    return {}
+  end
+  if type(def.paks) ~= "table" or #def.paks == 0 then return nil, '"paks" must be a non-empty list' end
+  local newEnough = false                                 -- an older loader would install the Lua part and silently drop the paks
+  for _, spec in ipairs(def.depends or {}) do
+    local id, cons = parseDep(spec)
+    if id == "kmod" and #cons > 0 and not versionOk("0.3.999", cons) then newEnough = true end
+  end
+  if not newEnough then return nil, 'a package with paks needs "depends": ["kmod>=0.4.0"]' end
+  local declared, wanted, taken = {}, {}, {}
+  for _, p in ipairs(def.paks) do
+    local file = type(p) == "table" and p.file
+    if type(file) ~= "string" or file:sub(1, 5) ~= "paks/" then return nil, 'every entry of "paks" needs "file": "paks/..."' end
+    local name = file:match("([^/]+)$") or ""
+    local ext = name:match("^[^%.].*%.(%a+)$")
+    if not ext or not PAK_EXT[ext:lower()] or name:find('[\\:*?"<>|]') then return nil, "not a pak file name: " .. file end
+    for _, g in ipairs(GAME_PAKS) do if name:lower():sub(1, #g) == g then return nil, "a mod may not replace the game's own " .. name end end
+    local sha = type(p.sha256) == "string" and p.sha256:lower() or ""
+    if #sha ~= 64 or sha:find("%X") then return nil, "sha256 missing or invalid for " .. file end
+    if declared[file] then return nil, "listed twice: " .. file end
+    if not inZip[file] then return nil, "declared but not in the package: " .. file end
+    declared[file] = true
+    local here = pakPlatform(p.platforms)
+    if here == nil then return nil, "bad platforms of " .. file end
+    local actual, zerr = kmod.zip_extract(zipPath, file)          -- reads and hashes the entry, writes nothing
+    if not actual then return nil, tostring(zerr) end
+    if actual ~= sha then return nil, "checksum mismatch: " .. file end
+    if here then
+      if taken[name:lower()] then return nil, "two files named " .. name .. " for " .. kmod.platform end
+      taken[name:lower()] = true
+      wanted[#wanted + 1] = { name = name, entry = file, sha256 = sha, size = inZip[file] }
+    end
+  end
+  for f in pairs(inZip) do if not declared[f] then return nil, 'in the package but not listed in "paks": ' .. f end end
+  for _, w in ipairs(wanted) do
+    local stem = w.name:match("^(.*)%.%a+$")
+    if not taken[(stem .. ".pak"):lower()] then return nil, w.name .. " has no .pak beside it" end
+  end
+  return wanted
+end
+
+-- what installing these files would do to the paks that are there now
+local function planPaks(id, wanted)
+  local owners = loadOwners()
+  local rec = owners.mods[id]
+  local old, names = {}, {}
+  for _, f in ipairs(rec and rec.files or {}) do old[f.name] = f.sha256 end
+  local plan = { write = {}, replace = {}, remove = {}, conflicts = {} }
+  local same = true
+  for _, w in ipairs(wanted) do names[w.name] = true; if old[w.name] ~= w.sha256 then same = false end end
+  for name in pairs(old) do if not names[name] then plan.remove[#plan.remove + 1] = name; same = false end end
+  table.sort(plan.remove)
+  if same then plan.action = "none"; return plan end    -- already installed; a pak the player deleted by hand stays deleted
+  for _, w in ipairs(wanted) do
+    local cur = pakPath(w.name)
+    if not cur then plan.write[#plan.write + 1] = w
+    elseif old[w.name] then
+      if old[w.name] ~= w.sha256 then plan.write[#plan.write + 1] = w; plan.replace[#plan.replace + 1] = w.name end
+    else
+      local owner
+      for other, r in pairs(owners.mods) do
+        if other ~= id then for _, f in ipairs(r.files or {}) do if f.name == w.name then owner = other end end end
+      end
+      if kmod.file_sha256(cur) ~= w.sha256 then                  -- the identical file is simply taken over
+        plan.write[#plan.write + 1] = w
+        plan.conflicts[#plan.conflicts + 1] = owner and (w.name .. " (" .. owner .. ")") or w.name
+      end
+    end
+  end
+  local update = rec ~= nil or kmod.exists(P.loaded .. "/" .. id)
+  plan.action = (#plan.conflicts > 0 or #plan.remove > 0 or (update and #plan.write > 0)) and "confirm" or "apply"
+  plan.staged = plan.action == "confirm"
+  return plan
+end
+
+local function applyPaks(zipPath, def, wanted, plan)
+  local dir = plan.staged and P.pak_staged or P.paks
+  mkdirs(P.pak_staged); mkdirs(P.paks)
+  local function undo() for _, w in ipairs(plan.write) do os.remove(dir .. "/" .. w.name .. ".tmp") end end
+  for _, w in ipairs(plan.write) do                       -- everything is extracted and checked before anything is renamed
+    local sha, err = kmod.zip_extract(zipPath, w.entry, dir .. "/" .. w.name .. ".tmp")
+    if sha ~= w.sha256 then undo(); return false, "cannot install " .. w.name .. ": " .. tostring(err or "checksum mismatch") end
+  end
+  for _, w in ipairs(plan.write) do
+    local dst = dir .. "/" .. w.name
+    os.remove(P.pak_staged .. "/" .. w.name .. ".del")
+    os.remove(dst)
+    local ok, err = os.rename(dst .. ".tmp", dst)
+    if not ok then undo(); return false, "cannot install " .. w.name .. ": " .. tostring(err) end
+    log("pak " .. w.name .. (plan.staged and " staged for the next start" or " installed"))
+  end
+  for _, name in ipairs(plan.remove) do
+    os.remove(P.pak_staged .. "/" .. name)
+    writeFile(P.pak_staged .. "/" .. name .. ".del", "")
+    plan.staged = true
+  end
+  local owners = loadOwners()
+  local mine = {}
+  for _, w in ipairs(wanted) do mine[w.name] = true end
+  for other, r in pairs(owners.mods) do                   -- files taken over from another package are no longer its own
+    if other ~= def.id then
+      local keep = {}
+      for _, f in ipairs(r.files or {}) do if not mine[f.name] then keep[#keep + 1] = f end end
+      r.files = keep
+    end
+  end
+  if #wanted == 0 then owners.mods[def.id] = nil
+  else
+    local files = {}
+    for _, w in ipairs(wanted) do files[#files + 1] = { name = w.name, sha256 = w.sha256, size = w.size } end
+    owners.mods[def.id] = { version = tostring(def.version), files = files }
+  end
+  saveOwners(owners)
+  if #plan.write > 0 or #plan.remove > 0 then
+    if plan.staged or kmod.platform ~= "Android" then kmod.pak_restart = true       -- Android can mount a new pak right away
+    else kmod._pak_mount = true end
+  end
+  return true
+end
+
+-- has someone else (the launcher) installed exactly what a held-back package asked for?
+local function pakAlreadyInstalled(info)
+  local rec = loadOwners().mods[info.id]
+  local have = {}
+  for _, f in ipairs(rec and rec.files or {}) do have[#have + 1] = f.name .. ":" .. f.sha256 end
+  table.sort(have)
+  return table.concat(have, "|") == info.key
+end
+
 -- ------------------------------------------------------------------ .kmod installation
-local function installOne(zipPath)
+-- true, id  |  false, reason  |  "confirm", info (nothing installed: the player has to agree to the pak changes first)
+local function installOne(zipPath, fileName)
   local tmp = P.loaded .. "/.tmp"
   kmod.rmtree(tmp); mkdirs(tmp)
   local ok, err = kmod.unzip(zipPath, tmp)
@@ -456,7 +639,24 @@ local function installOne(zipPath)
       if not ok then return fail("requires " .. id .. bad .. " (have " .. have .. ")") end
     end
   end
-  if not kmod.exists(tmp .. "/main.lua") and def.native == nil then return fail("main.lua missing") end
+  if not kmod.exists(tmp .. "/main.lua") and def.native == nil and def.paks == nil then return fail("main.lua missing") end
+  local wanted, pakErr = packagePaks(zipPath, def)
+  if not wanted then return fail(pakErr) end
+  local plan = planPaks(def.id, wanted)
+  if plan.action == "confirm" and not pakApproved[fileName] then
+    kmod.rmtree(tmp)
+    local key, write = {}, {}
+    for _, w in ipairs(wanted) do key[#key + 1] = w.name .. ":" .. w.sha256 end
+    for _, w in ipairs(plan.write) do write[#write + 1] = w.name end
+    table.sort(key)
+    return "confirm", { id = def.id, name = tostring(def.name or def.id), version = tostring(def.version), key = table.concat(key, "|"),
+                        write = write, remove = plan.remove, conflicts = plan.conflicts }
+  end
+  if plan.action ~= "none" then
+    local ok, aerr = applyPaks(zipPath, def, wanted, plan)
+    if not ok then return fail(aerr) end
+  end
+  pakApproved[fileName] = nil
   local target = P.loaded .. "/" .. def.id
   if kmod.exists(target) then kmod.rmtree(target) end   -- upgrade = replace the package; data/ and state.json are untouched
   if not os.rename(tmp, target) then return fail("could not move package into mods/") end
@@ -472,6 +672,7 @@ function kmod.sync_mods()
   local stamps = P.loaded .. "/.stamps"
   mkdirs(stamps)
   local changed, present, keepStamp = 0, {}, {}
+  kmod.pak_pending = {}
   local entries = kmod.listdir(P.mods)
   for _, e in ipairs(entries) do                                  -- 1. mod folders
     if e.dir then
@@ -495,13 +696,20 @@ function kmod.sync_mods()
       local st = kmod.tree_stamp(src)
       local saved = readFile(stamps .. "/" .. sf) or ""
       local savedStamp, savedId = saved:match("^([^\n]*)\n?(.*)$")
-      if savedStamp == st and savedId ~= "" and (savedId:sub(1, 7) == "failed:" or kmod.exists(P.loaded .. "/" .. savedId)) then
+      local held = savedStamp == st and savedId:sub(1, 8) == "confirm:" and json.decode(savedId:sub(9))
+      if type(held) == "table" and not pakApproved[e.name] and not pakAlreadyInstalled(held) then
+        kmod.pak_pending[e.name] = held; present[held.id] = true      -- the installed version stays until the player agrees
+      elseif savedStamp == st and savedId ~= "" and savedId:sub(1, 8) ~= "confirm:" and (savedId:sub(1, 7) == "failed:" or kmod.exists(P.loaded .. "/" .. savedId)) then
         if savedId:sub(1, 7) == "failed:" then kmod.sync_errors[e.name] = savedId:sub(8)
         elseif present[savedId] then logw(e.name .. ": a folder with the same id exists; the folder is used")
         else present[savedId] = true end
       else
-        local ok, res = installOne(src)
-        if ok then
+        local ok, res = installOne(src, e.name)
+        if ok == "confirm" then
+          writeFile(stamps .. "/" .. sf, st .. "\nconfirm:" .. json.encode(res)); present[res.id] = true
+          kmod.pak_pending[e.name] = res; kmod.sync_errors[e.name] = nil
+          logw(e.name .. ": it changes pak files; confirm on the Mods page (console: paks confirm " .. e.name .. ")")
+        elseif ok then
           if present[res] and kmod.exists(P.mods .. "/" .. res) then logw(e.name .. ": a folder with the same id (" .. res .. ") exists; the folder is used")
           else writeFile(stamps .. "/" .. sf, st .. "\n" .. res); present[res] = true; changed = changed + 1; kmod.sync_errors[e.name] = nil; log("extracted " .. res .. " from " .. e.name) end
         else
@@ -517,7 +725,18 @@ function kmod.sync_mods()
   for _, e in ipairs(kmod.listdir(stamps)) do
     if not keepStamp[e.name] then os.remove(stamps .. "/" .. e.name) end
   end
+  if kmod._pak_mount then kmod._pak_mount = false; if kmod.mount_pending_paks then kmod.mount_pending_paks() end end
   return changed
+end
+
+-- The player agreed to the pak changes of a held-back package. Returns true, or false + the reason.
+function kmod.confirm_paks(file)
+  if not kmod.pak_pending[file] then return false, "nothing to confirm for " .. tostring(file) end
+  pakApproved[file] = true
+  kmod.sync_mods()
+  pakApproved[file] = nil
+  if kmod.sync_errors[file] then return false, kmod.sync_errors[file] end
+  return true
 end
 
 local lastLang = nil
@@ -718,6 +937,7 @@ local function loadOne(rec)
     env.Native = (kmod._natives and kmod._natives[rec.id]) or {}
     if not rec.entry then rec.status = "loaded"; kmod._status[rec.id] = rec.status; log("loaded " .. rec.id .. " v" .. rec.version .. " (native)"); return end
   end
+  if not rec.entry then rec.status = "loaded"; kmod._status[rec.id] = rec.status; log("loaded " .. rec.id .. " v" .. rec.version .. " (paks only)"); return end
   local chunk, err = loadfile(rec.entry, "t", env)
   if not chunk then rec.status = "load error: " .. tostring(err); kmod._status[rec.id] = rec.status; loge(rec.id .. ": " .. rec.status); return end
   kmod.set_activity("mod", rec.id, "load")        -- a crash while the mod's main.lua runs is blamed on it

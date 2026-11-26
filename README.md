@@ -11,7 +11,7 @@ Download a zip from [Releases](https://github.com/CCB-TEAM/KMod-Loader-Windows/r
 * `release` — everyday use.
 * `dev` — adds a console window (live log, console commands, Lua) and debug logging, for mod authors.
 
-Mods go into `kmod\mods\` (folders or `.kmod` packages); the log is `kmod\logs\kmod.log`. There is no paks folder on Windows.
+Mods go into `kmod\mods\` (folders or `.kmod` packages); the log is `kmod\logs\kmod.log`. Pak mods live in the game's own `kards\Content\Paks`; the paks a `.kmod` package declares are installed there.
 
 ## How it works
 

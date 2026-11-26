@@ -224,6 +224,21 @@ builtin("unquarantine", function(args)
 end, "allow a mod or pak that crashed the game to load again", "unquarantine <mod|pak> <name>")
 
 builtin("paks", function(args)
+  if args[1] == "confirm" then                             -- paks a .kmod wants to change (also on the Mods page)
+    kmod.sync_mods()
+    if args[2] then
+      local ok, err = kmod.confirm_paks(args[2])
+      if not ok then return "not installed: " .. tostring(err) end
+      kmod.reload_mods()
+      return "installed" .. (kmod.pak_restart and "; restart the game for the pak changes" or "")
+    end
+    local lines = {}
+    for file, i in pairs(kmod.pak_pending) do
+      lines[#lines + 1] = string.format("  %s: %s %s  writes [%s] removes [%s] conflicts [%s]", file, i.name, i.version,
+        table.concat(i.write or {}, ", "), table.concat(i.remove or {}, ", "), table.concat(i.conflicts or {}, ", "))
+    end
+    return #lines > 0 and table.concat(lines, "\n") or "no package is waiting to change paks"
+  end
   if args[1] == "off" or args[1] == "on" then
     if not args[2] then return "usage: paks " .. args[1] .. " <file name>" end
     kmod.pak_off(args[2], args[1] == "off")
@@ -234,7 +249,7 @@ builtin("paks", function(args)
   local lines = {}
   for _, p in ipairs(list) do lines[#lines + 1] = string.format("  %-40s %s", p.name, p.status) end
   return table.concat(lines, "\n")
-end, "list the pak files in kmod/paks with their status; 'paks off <file>' / 'paks on <file>' switch one off or on", "paks [off|on <file>]")
+end, "list the pak files in kmod/paks with their status; 'paks off <file>' / 'paks on <file>' switch one off or on; 'paks confirm' handles pak updates of .kmod packages", "paks [off|on <file>] | paks confirm [<package.kmod>]")
 
 local function setEnabled(id, on)
   local rec = id and findMod(id)

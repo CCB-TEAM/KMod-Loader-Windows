@@ -2,6 +2,7 @@
 // API names follow UE4SS (docs/lua-api) so existing knowledge/scripts carry over.
 #include "gif_decode.h"
 #include "lua_host.h"
+#include "pak_mods.h"
 
 #include <zlib.h>
 #include <algorithm>
@@ -265,9 +266,22 @@ UObject* CheckObj(lua_State* L, int i)
 
 void PushFromAddr(lua_State* L, FProperty* p, const uint8_t* addr);
 
+// A struct without a single reflected property (FGeometry, for one) cannot be rebuilt from fields: its table carries the raw
+// bytes in __raw, so that passing it back to the engine (SlateBlueprintLibrary...) hands over the real value instead of zeros.
+// Returns the size of such a struct, 0 for any other (or an implausibly big) one.
+int OpaqueStructSize(UStruct* s)
+{
+    if (!s) return 0;
+    for (UStruct* c = s; c; c = Rf::SuperOf(c))
+        if (Rf::PropsOf(c)) return 0;
+    int n = Rf::At<int32_t>(s, Rf::L.ustruct_size);
+    return (n > 0 && n <= 256) ? n : 0;
+}
+
 void PushStruct(lua_State* L, UStruct* s, const uint8_t* base)
 {
     lua_newtable(L);
+    if (int n = OpaqueStructSize(s)) { lua_pushlstring(L, reinterpret_cast<const char*>(base), n); lua_setfield(L, -2, "__raw"); }
     for (UStruct* c = s; c; c = Rf::SuperOf(c))
         for (FField* f = Rf::PropsOf(c); f; f = Rf::NextOf(f))
         {
@@ -511,6 +525,14 @@ bool SetFromLua(lua_State* L, int idx, FProperty* p, uint8_t* addr, bool isParam
     {
         if (!lua_istable(L, idx)) { err = "expected table for struct"; return false; }
         UStruct* s = Rf::StructOf(p);
+        if (int n = OpaqueStructSize(s))
+        {
+            lua_getfield(L, idx, "__raw");
+            size_t len = 0;
+            const char* data = lua_type(L, -1) == LUA_TSTRING ? lua_tolstring(L, -1, &len) : nullptr;
+            if (data && len == (size_t)n) memcpy(addr, data, len);
+            lua_pop(L, 1);
+        }
         for (UStruct* c = s; c; c = Rf::SuperOf(c))
             for (FField* f = Rf::PropsOf(c); f; f = Rf::NextOf(f))
             {
@@ -1931,80 +1953,6 @@ bool MkdirAll(const std::string& path)
     return stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
 }
 
-uint32_t Rd32(const unsigned char* p) { return p[0] | (p[1] << 8) | (p[2] << 16) | ((uint32_t)p[3] << 24); }
-uint16_t Rd16(const unsigned char* p) { return (uint16_t)(p[0] | (p[1] << 8)); }
-
-bool SafeZipName(const std::string& n)
-{
-    if (n.empty() || n[0] == '/' || n.find(':') != std::string::npos) return false;
-    size_t i = 0;
-    while (i <= n.size())
-    {
-        size_t j = n.find('/', i);
-        if (j == std::string::npos) j = n.size();
-        if (n.compare(i, j - i, "..") == 0) return false;     // no path traversal
-        i = j + 1;
-    }
-    return true;
-}
-
-// minimal zip reader: stored + deflate, size limits, path-traversal safe
-bool UnzipTo(const std::string& zipPath, const std::string& dest, std::string& err)
-{
-    std::string blob = ReadFileStr(zipPath);
-    if (blob.size() < 22 || blob.size() > (128u << 20)) { err = "bad zip size"; return false; }
-    const unsigned char* d = reinterpret_cast<const unsigned char*>(blob.data());
-    const size_t n = blob.size();
-    size_t eocd = std::string::npos;
-    for (size_t back = 22; back <= std::min<size_t>(n, 65557); back++)
-        if (Rd32(d + (n - back)) == 0x06054b50) { eocd = n - back; break; }
-    if (eocd == std::string::npos) { err = "not a zip file"; return false; }
-    const uint16_t count = Rd16(d + eocd + 10);
-    size_t p = Rd32(d + eocd + 16);
-    size_t total = 0;
-    for (uint16_t k = 0; k < count; k++)
-    {
-        if (p + 46 > n || Rd32(d + p) != 0x02014b50) { err = "corrupt central directory"; return false; }
-        const uint16_t method = Rd16(d + p + 10);
-        const uint32_t csize = Rd32(d + p + 20), usize = Rd32(d + p + 24);
-        const uint16_t nlen = Rd16(d + p + 28), elen = Rd16(d + p + 30), clen = Rd16(d + p + 32);
-        const uint32_t lho = Rd32(d + p + 42);
-        if (p + 46 + nlen > n) { err = "corrupt entry name"; return false; }
-        std::string name(reinterpret_cast<const char*>(d + p + 46), nlen);
-        p += 46 + nlen + elen + clen;
-        for (char& c : name) if (c == '\\') c = '/';
-        if (!SafeZipName(name)) { err = "unsafe path in zip: " + name; return false; }
-        const std::string full = dest + "/" + name;
-        if (name.back() == '/') { MkdirAll(full); continue; }
-        if (usize > (32u << 20)) { err = "entry too large: " + name; return false; }
-        total += usize;
-        if (total > (128u << 20)) { err = "archive too large"; return false; }
-        if ((size_t)lho + 30 > n || Rd32(d + lho) != 0x04034b50) { err = "corrupt local header"; return false; }
-        const size_t dataOff = (size_t)lho + 30 + Rd16(d + lho + 26) + Rd16(d + lho + 28);
-        if (dataOff + csize > n) { err = "truncated entry: " + name; return false; }
-        std::string out;
-        if (method == 0) out.assign(reinterpret_cast<const char*>(d + dataOff), csize);
-        else if (method == 8)
-        {
-            out.resize(usize);
-            z_stream zs{};
-            zs.next_in = const_cast<Bytef*>(d + dataOff); zs.avail_in = csize;
-            zs.next_out = reinterpret_cast<Bytef*>(&out[0]); zs.avail_out = usize;
-            if (inflateInit2(&zs, -15) != Z_OK) { err = "inflateInit failed"; return false; }
-            int r = inflate(&zs, Z_FINISH);
-            inflateEnd(&zs);
-            if (r != Z_STREAM_END || zs.total_out != usize) { err = "inflate failed: " + name; return false; }
-        }
-        else { err = "unsupported compression method in " + name; return false; }
-        MkdirAll(full.substr(0, full.rfind('/')));
-        FILE* f = fopen(full.c_str(), "wb");
-        if (!f) { err = "cannot write " + full; return false; }
-        fwrite(out.data(), 1, out.size(), f);
-        fclose(f);
-    }
-    return true;
-}
-
 void RmTree(const std::string& path)
 {
     struct stat st;
@@ -2031,7 +1979,7 @@ int Ccb_Unzip(lua_State* L)    // ok, err = kmod.unzip(zipPath, destDir)
     std::string err;
     std::string dest = luaL_checkstring(L, 2);
     MkdirAll(dest);
-    if (UnzipTo(luaL_checkstring(L, 1), dest, err)) { lua_pushboolean(L, 1); return 1; }
+    if (KMod_UnzipPackage(luaL_checkstring(L, 1), dest, err)) { lua_pushboolean(L, 1); return 1; }
     lua_pushboolean(L, 0); lua_pushstring(L, err.c_str());
     return 2;
 }
@@ -2665,6 +2613,7 @@ void LuaHost_Init()
     lua_setfield(L, -2, "paths");
     lua_pushstring(L, "Windows"); lua_setfield(L, -2, "platform");
     lua_pushstring(L, "windows-x64"); lua_setfield(L, -2, "native_dir");
+    KModPak_Register(L);
     lua_pop(L, 1);
     mkdir(KModRoot().c_str(), 0777);
     mkdir(ModsDir().c_str(), 0777);
